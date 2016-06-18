@@ -28,20 +28,23 @@ import org.moqui.entity.EntityValue
 import org.moqui.impl.StupidClassLoader
 import org.moqui.impl.StupidJavaUtilities
 import org.moqui.impl.StupidUtilities
-import org.moqui.impl.StupidWebUtilities
 import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.reference.UrlResourceReference
 import org.moqui.impl.entity.EntityFacadeImpl
 import org.moqui.impl.entity.EntityValueBase
 import org.moqui.impl.screen.ScreenFacadeImpl
 import org.moqui.impl.service.ServiceFacadeImpl
+import org.moqui.impl.webapp.NotificationWebSocketListener
 import org.moqui.screen.ScreenFacade
 import org.moqui.service.ServiceFacade
 import org.moqui.util.MNode
+import org.moqui.util.SimpleTopic
 import org.moqui.util.SystemBinding
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
+import javax.servlet.ServletContext
+import javax.websocket.server.ServerContainer
 import java.sql.Timestamp
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ExecutorService
@@ -94,6 +97,14 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     /** The SecurityManager for Apache Shiro */
     protected org.apache.shiro.mgt.SecurityManager internalSecurityManager
+    /** The ServletContext, if Moqui was initialized in a webapp (generally through MoquiContextListener) */
+    protected ServletContext internalServletContext = null
+    /** The WebSocket ServerContainer, if found in 'javax.websocket.server.ServerContainer' ServletContext attribute */
+    protected ServerContainer internalServerContainer = null
+
+    /** Notification Message Topic (for distributed notifications) */
+    private SimpleTopic<NotificationMessageImpl> notificationMessageTopic = null
+    private NotificationWebSocketListener notificationWebSocketListener = new NotificationWebSocketListener()
 
     // ======== Permanent Delegated Facades ========
     @SuppressWarnings("GrFinalVariableAccess")
@@ -350,10 +361,8 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         skipStatsCond = serverStatsNode.attribute("stats-skip-condition")
         hitBinLengthMillis = (serverStatsNode.attribute("bin-length-seconds") as Integer)*1000 ?: 900000
 
-        // init ESAPI - NOTE: this should be the first call to anything related to ESAPI or StupidWebUtilities so config is in place
-        if (!System.getProperty("org.owasp.esapi.resources")) System.setProperty("org.owasp.esapi.resources", runtimePath + "/conf/esapi")
-        logger.info("Starting ESAPI, resources at ${System.getProperty("org.owasp.esapi.resources")}")
-        StupidWebUtilities.canonicalizeValue("test")
+        // register notificationWebSocketListener
+        registerNotificationMessageListener(notificationWebSocketListener)
 
         // Load ToolFactory implementations from tools.tool-factory elements, run preFacadeInit() methods
         ArrayList<Map<String, String>> toolFactoryAttrsList = new ArrayList<>()
@@ -403,6 +412,11 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
                 logger.error("Error initializing ToolFactory ${tf.getName()}", t)
             }
         }
+
+        // Notification Message Topic
+        String notificationTopicFactory = confXmlRoot.first("tools").attribute("notification-topic-factory")
+        if (notificationTopicFactory)
+            notificationMessageTopic = (SimpleTopic<NotificationMessageImpl>) getTool(notificationTopicFactory, SimpleTopic.class)
 
         // Warm cache on start if configured to do so
         if (confXmlRoot.first("cache-list").attribute("warm-on-start") != "false") warmCache()
@@ -456,6 +470,8 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             }
         }
 
+        // clear not found info just in case anything was falsely added
+        cachedClassLoader.clearNotFoundInfo()
         // set as context classloader
         Thread.currentThread().setContextClassLoader(cachedClassLoader)
     }
@@ -576,11 +592,39 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     InetAddress getLocalhostAddress() { return localhostAddress }
 
+    @Override
     void registerNotificationMessageListener(NotificationMessageListener nml) {
         nml.init(this)
         registeredNotificationMessageListeners.add(nml)
     }
-    List<NotificationMessageListener> getNotificationMessageListeners() { return registeredNotificationMessageListeners }
+    /** Called by NotificationMessageImpl.send(), send to topic (possibly distributed) */
+    void sendNotificationMessageToTopic(NotificationMessageImpl nmi) {
+        if (notificationMessageTopic != null) {
+            // send it to the topic, this will call notifyNotificationMessageListeners(nmi)
+            notificationMessageTopic.publish(nmi)
+            // logger.warn("Sent nmi to distributed topic, topic=${nmi.topic}, tenant=${nmi.tenantId}")
+        } else {
+            // run it locally
+            notifyNotificationMessageListeners(nmi)
+        }
+    }
+    /** This is called when message received from topic (possibly distributed) */
+    void notifyNotificationMessageListeners(NotificationMessageImpl nmi) {
+        if (nmi.tenantId == null) {
+            logger.warn("Received NotificationMessageImpl message on topic ${nmi.topic} with null tenantId, ignoring")
+            return
+        }
+        // process notifications in the worker thread pool
+        ExecutionContextImpl.ThreadPoolRunnable runnable = new ExecutionContextImpl.ThreadPoolRunnable(this, nmi.tenantId, null, {
+            int nmlSize = registeredNotificationMessageListeners.size()
+            for (int i = 0; i < nmlSize; i++) {
+                NotificationMessageListener nml = (NotificationMessageListener) registeredNotificationMessageListeners.get(i)
+                nml.onMessage(nmi)
+            }
+        })
+        workerPool.execute(runnable)
+    }
+    NotificationWebSocketListener getNotificationWebSocketListener() { return notificationWebSocketListener }
 
     org.apache.shiro.mgt.SecurityManager getSecurityManager() {
         if (internalSecurityManager != null) return internalSecurityManager
@@ -626,6 +670,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     CacheFacadeImpl getCacheFacade() { return this.cacheFacade }
 
+    Collection<EntityFacadeImpl> getAllEntityFacades() { entityFacadeByTenantMap.values() }
     EntityFacadeImpl getEntityFacade() { return getEntityFacade(getExecutionContext().getTenantId()) }
     EntityFacadeImpl getEntityFacade(String tenantId) {
         // this should never happen, may want to default to tenantId=DEFAULT, but to see if it happens anywhere throw for now
@@ -691,10 +736,10 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         return toolFactory
     }
     @Override
-    <V> V getTool(String toolName, Class<V> instanceClass) {
+    <V> V getTool(String toolName, Class<V> instanceClass, Object... parameters) {
         ToolFactory<V> toolFactory = (ToolFactory<V>) toolFactoryMap.get(toolName)
         if (toolFactory == null) throw new IllegalArgumentException("No ToolFactory found with name ${toolName}")
-        return toolFactory.getInstance()
+        return toolFactory.getInstance(parameters)
     }
 
     /*
@@ -886,27 +931,31 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     @Override
     L10nFacade getL10n() { getEci().getL10nFacade() }
-
     @Override
-    ResourceFacade getResource() { return resourceFacade }
-
+    ResourceFacade getResource() { resourceFacade }
     @Override
-    LoggerFacade getLogger() { return loggerFacade }
-
+    LoggerFacade getLogger() { loggerFacade }
     @Override
-    CacheFacade getCache() { return this.cacheFacade }
-
+    CacheFacade getCache() { this.cacheFacade }
     @Override
-    TransactionFacade getTransaction() { return transactionFacade }
-
+    TransactionFacade getTransaction() { transactionFacade }
     @Override
     EntityFacade getEntity() { getEntityFacade(getExecutionContext()?.getTenantId()) }
+    @Override
+    EntityFacade getEntity(String tenantId) { getEntityFacade(tenantId) }
+    @Override
+    ServiceFacade getService() { serviceFacade }
+    @Override
+    ScreenFacade getScreen() { screenFacade }
 
     @Override
-    ServiceFacade getService() { return serviceFacade }
-
+    ServletContext getServletContext() { internalServletContext }
     @Override
-    ScreenFacade getScreen() { return screenFacade }
+    ServerContainer getServerContainer() { internalServerContainer }
+    void initServletContext(ServletContext sc) {
+        internalServletContext = sc
+        internalServerContainer = (ServerContainer) sc.getAttribute("javax.websocket.server.ServerContainer")
+    }
 
     // ========== Server Stat Tracking ==========
     boolean getSkipStats() {
@@ -1371,6 +1420,8 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             for (MNode upNode in overrideNode.children("url-pattern")) childBaseNode.append(upNode.deepCopy(null))
         })
         baseNode.mergeSingleChild(overrideNode, "session-config")
+
+        baseNode.mergeChildrenByKey(overrideNode, "endpoint", "path", null)
     }
 
     protected static void mergeWebappActions(MNode baseWebappNode, MNode overrideWebappNode, String childNodeName) {

@@ -56,9 +56,9 @@ abstract class EntityValueBase implements EntityValue {
     private String entityName
     private final Map<String, Object> valueMap = new HashMap<>()
 
-    protected transient EntityFacadeImpl efiTransient = null
-    protected transient TransactionCache txCacheInternal = null
-    protected transient EntityDefinition entityDefinitionTransient = null
+    protected transient EntityFacadeImpl efiTransient = (EntityFacadeImpl) null
+    protected transient TransactionCache txCacheInternal = (TransactionCache) null
+    protected transient EntityDefinition entityDefinitionTransient = (EntityDefinition) null
 
     /* Original DB Value Map: not used unless the value has been modified from its original state from the DB */
     private transient Map<String, Object> dbValueMap = (Map<String, Object>) null
@@ -86,14 +86,15 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     void writeExternal(ObjectOutput out) throws IOException {
         // NOTE: found that the serializer in Hazelcast is REALLY slow with writeUTF(), uses String.chatAt() in a for loop, crazy
-        out.writeObject(entityName.toCharArray())
-        out.writeObject(tenantId.toCharArray())
+        // NOTE2: in Groovy this results in castToType() overhead anyway, so for now use writeUTF/readUTF as other serialization might be more efficient
+        out.writeUTF(entityName)
+        out.writeUTF(tenantId)
         out.writeObject(valueMap)
     }
     @Override
     void readExternal(ObjectInput objectInput) throws IOException, ClassNotFoundException {
-        entityName = new String((char[]) objectInput.readObject())
-        tenantId = new String((char[]) objectInput.readObject())
+        entityName = objectInput.readUTF()
+        tenantId = objectInput.readUTF()
         valueMap.putAll((Map<String, Object>) objectInput.readObject())
     }
 
@@ -208,7 +209,8 @@ abstract class EntityValueBase implements EntityValue {
                     List<String> pks
                     MNode aliasNode = null
                     String memberEntityName = null
-                    if (ed.isViewEntity()) {
+                    if (ed.isViewEntity() && !ed.isDynamicViewEntity()) {
+                        // NOTE: there are issues with dynamic view entities here, may be possible to fix them but for now not running for EntityDynamicView
                         aliasNode = ed.getFieldNode(name)
                         memberEntityName = ed.getMemberEntityName(aliasNode.attribute('entity-alias'))
                         EntityDefinition memberEd = getEntityFacadeImpl().getEntityDefinition(memberEntityName)
@@ -1112,7 +1114,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     EntityValue create() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1154,7 +1156,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "create", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "create", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, 1L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, 1L)
         } finally {
             // pop the ArtifactExecutionInfo to clean it up
             ec.getArtifactExecution().pop(aei)
@@ -1207,7 +1209,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     EntityValue update() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1243,7 +1245,7 @@ abstract class EntityValueBase implements EntityValue {
 
         // Save original values before anything is changed for DataFeed and audit log
         Map<String, Object> originalValues = dbValueMap != null && dbValueMap.size() > 0 ?
-                new HashMap<String, Object>(dbValueMap) : null
+                new HashMap<String, Object>(dbValueMap) : (Map<String, Object>) null
 
         // do the artifact push/authz
         ArtifactExecutionInfoImpl aei = new ArtifactExecutionInfoImpl(ed.getFullEntityName(),
@@ -1301,7 +1303,7 @@ abstract class EntityValueBase implements EntityValue {
             TransactionCache curTxCache = getTxCache(ecfi)
             if (curTxCache == null || !curTxCache.update(this)) {
                 // no TX cache update, etc: ready to do actual update
-                this.basicUpdate(pkFieldList, nonPkFieldList, null, ec)
+                this.basicUpdate(pkFieldList, nonPkFieldList, (Connection) null, ec)
             }
 
             // clear the entity cache
@@ -1312,7 +1314,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "update", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "update", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, 1L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, 1L)
         } finally {
             // pop the ArtifactExecutionInfo to clean it up
             ec.getArtifactExecution().pop(aei)
@@ -1400,7 +1402,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     EntityValue delete() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1435,7 +1437,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "delete", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "delete", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, 1L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, 1L)
         } finally {
             // pop the ArtifactExecutionInfo to clean it up
             ec.getArtifactExecution().pop(aei)
@@ -1472,7 +1474,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     boolean refresh() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1510,7 +1512,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "find-one", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "refresh", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, retVal ? 1L : 0L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, retVal ? 1L : 0L)
 
         } finally {
             // pop the ArtifactExecutionInfo to clean it up

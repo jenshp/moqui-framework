@@ -13,7 +13,6 @@
  */
 
 import java.io.*;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -45,7 +44,7 @@ public class MoquiStart extends ClassLoader {
             // setup the class loader
             MoquiStart moquiStartLoader = new MoquiStart(true);
             Thread.currentThread().setContextClassLoader(moquiStartLoader);
-            Runtime.getRuntime().addShutdownHook(new MoquiShutdown(null, null, moquiStartLoader.jarFileList));
+            Runtime.getRuntime().addShutdownHook(new MoquiShutdown(null, null, moquiStartLoader));
             initSystemProperties(moquiStartLoader, false);
 
             System.out.println("Internal Class Path Jars:");
@@ -80,6 +79,7 @@ public class MoquiStart extends ClassLoader {
         System.out.println("Using temporary directory: " + tempDir.getCanonicalPath());
         if (tempDir.exists()) {
             System.out.println("Found temporary directory " + tempDirName + ", deleting");
+            //noinspection ResultOfMethodCallIgnored
             tempDir.delete();
         }
 
@@ -90,7 +90,7 @@ public class MoquiStart extends ClassLoader {
         if ("-load".equals(firstArg)) {
             MoquiStart moquiStartLoader = new MoquiStart(true);
             Thread.currentThread().setContextClassLoader(moquiStartLoader);
-            Runtime.getRuntime().addShutdownHook(new MoquiShutdown(null, null, moquiStartLoader.jarFileList));
+            Runtime.getRuntime().addShutdownHook(new MoquiShutdown(null, null, moquiStartLoader));
             initSystemProperties(moquiStartLoader, false);
 
             Map<String, String> argMap = new HashMap<>();
@@ -118,10 +118,10 @@ public class MoquiStart extends ClassLoader {
         // ===== Done trying specific commands, so load the embedded server
 
         // Get a start loader with loadWebInf=false since the container will load those we don't want to here (would be on classpath twice)
-        MoquiStart moquiStartLoader = new MoquiStart(false);
+        MoquiStart moquiStartLoader = new MoquiStart(reportJarsUnused);
         Thread.currentThread().setContextClassLoader(moquiStartLoader);
         // NOTE: using shutdown hook to close files only:
-        Thread shutdownHook = new MoquiShutdown(null, null, moquiStartLoader.jarFileList);
+        Thread shutdownHook = new MoquiShutdown(null, null, moquiStartLoader);
         shutdownHook.setDaemon(true);
         Runtime.getRuntime().addShutdownHook(shutdownHook);
 
@@ -145,27 +145,37 @@ public class MoquiStart extends ClassLoader {
             System.out.println("Running embedded server on port " + port + " with args [" + argMap + "]");
 
             Class<?> serverClass = moquiStartLoader.loadClass("org.eclipse.jetty.server.Server");
-            Class<?> webappClass = moquiStartLoader.loadClass("org.eclipse.jetty.webapp.WebAppContext");
+            Class<?> handlerClass = moquiStartLoader.loadClass("org.eclipse.jetty.server.Handler");
 
-            Constructor serverConstructor = serverClass.getConstructor(int.class);
-            // TODO: configurable
-            Object server = serverConstructor.newInstance(port);
-            Constructor webappConstructor = webappClass.getConstructor();
-            Object webapp = webappConstructor.newInstance();
+            Object server = serverClass.getConstructor(int.class).newInstance(port);
+
+            // WebApp
+            Class<?> webappClass = moquiStartLoader.loadClass("org.eclipse.jetty.webapp.WebAppContext");
+            Object webapp = webappClass.getConstructor().newInstance();
 
             webappClass.getMethod("setContextPath", String.class).invoke(webapp, "/");
             webappClass.getMethod("setDescriptor", String.class).invoke(webapp, moquiStartLoader.wrapperWarUrl.toExternalForm() + "/WEB-INF/web.xml");
             webappClass.getMethod("setServer", serverClass).invoke(webapp, server);
             webappClass.getMethod("setWar", String.class).invoke(webapp, moquiStartLoader.wrapperWarUrl.toExternalForm());
             webappClass.getMethod("setTempDirectory", File.class).invoke(webapp, new File(tempDirName + "/ROOT"));
-
-            Class<?> handlerClass = moquiStartLoader.loadClass("org.eclipse.jetty.server.Handler");
             serverClass.getMethod("setHandler", handlerClass).invoke(server, webapp);
+
+            if (reportJarsUnused) webappClass.getMethod("setClassLoader", ClassLoader.class).invoke(webapp, moquiStartLoader);
+
+            // WebSocket
+            Class<?> scHandlerClass = moquiStartLoader.loadClass("org.eclipse.jetty.servlet.ServletContextHandler");
+            Class<?> wsInitializerClass = moquiStartLoader.loadClass("org.eclipse.jetty.websocket.jsr356.server.deploy.WebSocketServerContainerInitializer");
+            Object wsContainer = wsInitializerClass.getMethod("configureContext", scHandlerClass).invoke(null, webapp);
+            webappClass.getMethod("setAttribute", String.class, Object.class).invoke(webapp, "javax.websocket.server.ServerContainer", wsContainer);
+
+            // Start
             serverClass.getMethod("start").invoke(server);
             serverClass.getMethod("join").invoke(server);
 
             /* The classpath dependent code we are running:
             Server server = new Server(8080);
+
+            // WebApp
             WebAppContext webapp = new WebAppContext();
             webapp.setContextPath("/");
             webapp.setDescriptor(moquiStartLoader.wrapperWarUrl.toExternalForm() + "/WEB-INF/web.xml");
@@ -177,8 +187,12 @@ public class MoquiStart extends ClassLoader {
             // if the temp directory gets cleaned periodically.
             // Removed by the code elsewhere that deletes on close
             webapp.setTempDirectory(new File(tempDirName + "/ROOT"));
-
             server.setHandler(webapp);
+
+            // WebSocket
+            // NOTE: ServletContextHandler.SESSIONS = 1 (int)
+            ServerContainer wsContainer = org.eclipse.jetty.websocket.jsr356.server.deploy.WebSocketServerContainerInitializer.configureContext(webapp);
+            webapp.setAttribute("javax.websocket.server.ServerContainer", wsContainer);
 
             // Start things up!
             server.start();
@@ -250,12 +264,12 @@ public class MoquiStart extends ClassLoader {
     private static class MoquiShutdown extends Thread {
         final Method callMethod;
         final Object callObject;
-        final List<JarFile> jarFileList;
-        MoquiShutdown(Method callMethod, Object callObject, List<JarFile> jarFileList) {
+        final MoquiStart moquiStart;
+        MoquiShutdown(Method callMethod, Object callObject, MoquiStart moquiStart) {
             super();
             this.callMethod = callMethod;
             this.callObject = callObject;
-            this.jarFileList = jarFileList;
+            this.moquiStart = moquiStart;
         }
         public void run() {
             // run this first, ie shutdown the container before closing jarFiles to avoid errors with classes missing
@@ -268,15 +282,31 @@ public class MoquiStart extends ClassLoader {
             System.out.println("========== Shutting down Moqui Executable (closing jars, etc) ==========");
 
             // close all jarFiles so they will "deleteOnExit"
-            for (JarFile jarFile : jarFileList) {
+            for (JarFile jarFile : moquiStart.jarFileList) {
                 try {
                     jarFile.close();
                 } catch (IOException e) {
                     System.out.println("Error closing jar [" + jarFile + "]: " + e.toString());
                 }
             }
+
+            if (reportJarsUnused) {
+                Set<String> sortedJars = new TreeSet<>();
+                String baseName = "execwartmp/moqui_temp";
+                for (String jarName: moquiStart.jarsUnused) {
+                    if (jarName.startsWith(baseName)) {
+                        jarName = jarName.substring(baseName.length());
+                        while (Character.isDigit(jarName.charAt(0))) jarName = jarName.substring(1);
+                    }
+                    sortedJars.add(jarName);
+                }
+                for (String jarName: sortedJars) System.out.println("JAR unused: " + jarName);
+            }
         }
     }
+
+    private final static boolean reportJarsUnused = Boolean.valueOf(System.getProperty("report.jars.unused", "false"));
+    // private final static boolean reportJarsUnused = true;
 
     private JarFile outerFile = null;
     private URL wrapperWarUrl = null;
@@ -285,6 +315,8 @@ public class MoquiStart extends ClassLoader {
     private final Map<String, URL> resourceCache = new HashMap<>();
     private ProtectionDomain pd;
     private final boolean loadWebInf;
+
+    private final Set<String> jarsUnused = new HashSet<>();
 
     private MoquiStart(boolean loadWebInf) {
         this(ClassLoader.getSystemClassLoader(), loadWebInf);
@@ -320,8 +352,11 @@ public class MoquiStart extends ClassLoader {
         } catch (Exception e) {
             System.out.println("Error loading jars in war file [" + wrapperWarUrl + "]: " + e.toString());
         }
+
+        if (reportJarsUnused) for (JarFile jf : jarFileList) jarsUnused.add(jf.getName());
     }
 
+    @SuppressWarnings("ThrowFromFinallyBlock")
     private File createTempFile(JarEntry je) throws IOException {
         byte[] jeBytes = getJarEntryBytes(outerFile, je);
 
@@ -340,6 +375,7 @@ public class MoquiStart extends ClassLoader {
         return file;
     }
 
+    @SuppressWarnings("ThrowFromFinallyBlock")
     private byte[] getJarEntryBytes(JarFile jarFile, JarEntry je) throws IOException {
         DataInputStream dis = null;
         byte[] jeBytes = null;
@@ -378,6 +414,7 @@ public class MoquiStart extends ClassLoader {
         for (int i = 0; i < jarFileListSize; i++) {
             JarFile jarFile = jarFileList.get(i);
             JarEntry jarEntry = jarFile.getJarEntry(resourceName);
+            if (reportJarsUnused && jarEntry != null) jarsUnused.remove(jarFile.getName());
             // to better support war format, look for the resourceName in the WEB-INF/classes directory
             if (loadWebInf && jarEntry == null) jarEntry = jarFile.getJarEntry(webInfResourceName);
             if (jarEntry != null) {
@@ -404,6 +441,7 @@ public class MoquiStart extends ClassLoader {
         for (int i = 0; i < jarFileListSize; i++) {
             JarFile jarFile = jarFileList.get(i);
             JarEntry jarEntry = jarFile.getJarEntry(resourceName);
+            if (reportJarsUnused && jarEntry != null) jarsUnused.remove(jarFile.getName());
             // to better support war format, look for the resourceName in the WEB-INF/classes directory
             if (loadWebInf && jarEntry == null) jarEntry = jarFile.getJarEntry(webInfResourceName);
             if (jarEntry != null) {
@@ -458,8 +496,9 @@ public class MoquiStart extends ClassLoader {
         for (int i = 0; i < jarFileListSize; i++) {
             JarFile jarFile = jarFileList.get(i);
             // System.out.println("Finding Class [" + className + "] in jarFile [" + jarFile.getName() + "]");
-
             JarEntry jarEntry = jarFile.getJarEntry(classFileName);
+            if (reportJarsUnused && jarEntry != null) jarsUnused.remove(jarFile.getName());
+
             // to better support war format, look for the resourceName in the WEB-INF/classes directory
             if (loadWebInf && jarEntry == null) jarEntry = jarFile.getJarEntry(webInfFileName);
             if (jarEntry != null) {
