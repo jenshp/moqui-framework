@@ -41,7 +41,9 @@ public interface L10nFacade {
      */
     String formatCurrency(Object amount, String uomId, Integer fractionDigits);
     String formatCurrency(Object amount, String uomId);
+    String formatCurrency(Object amount, String uomId, boolean hideSymbol);
     String formatCurrency(Object amount, String uomId, Integer fractionDigits, Locale locale);
+    String formatCurrency(Object amount, String uomId, Integer fractionDigits, Locale locale, boolean hideSymbol);
 
     /** Format a Number, Timestamp, Date, Time, or Calendar object using the given format string. If no format string
      * is specified the default for the user's locale and time zone will be used.

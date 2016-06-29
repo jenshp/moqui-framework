@@ -20,6 +20,8 @@ import org.moqui.impl.StupidUtilities;
 
 import javax.xml.bind.DatatypeConverter;
 import java.math.BigDecimal;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.text.NumberFormat;
 import java.sql.Date;
 import java.sql.Time;
@@ -98,16 +100,25 @@ public class L10nFacadeImpl implements L10nFacade {
     }
 
     @Override
-    public String formatCurrency(Object amount, String uomId) {
-        return formatCurrency(amount, uomId, null);
+    public String formatCurrency(Object amount, String uomId) { return formatCurrency(amount, uomId, null); }
+
+    @Override
+    public String formatCurrency(Object amount, String uomId, boolean hideSymbol) {
+        return formatCurrency(amount, uomId, null, getLocale(), hideSymbol);
     }
 
     @Override
     public String formatCurrency(Object amount, String uomId, Integer fractionDigits) {
         return formatCurrency(amount, uomId, fractionDigits, getLocale());
     }
+
     @Override
     public String formatCurrency(Object amount, String uomId, Integer fractionDigits, Locale locale) {
+        return formatCurrency(amount, uomId, fractionDigits, locale, false);
+    }
+
+    @Override
+    public String formatCurrency(Object amount, String uomId, Integer fractionDigits, Locale locale, boolean hideSymbol) {
         if (amount == null) return "";
         if (amount instanceof CharSequence) {
             if (((CharSequence) amount).length() == 0) {
@@ -124,6 +135,11 @@ public class L10nFacadeImpl implements L10nFacade {
         if (uomId != null && uomId.length() > 0) nf.setCurrency(currency);
         nf.setMaximumFractionDigits(fractionDigits);
         nf.setMinimumFractionDigits(fractionDigits);
+        if (hideSymbol && nf instanceof DecimalFormat) {
+            DecimalFormatSymbols decimalFormatSymbols = ((DecimalFormat) nf).getDecimalFormatSymbols();
+            decimalFormatSymbols.setCurrencySymbol("");
+            ((DecimalFormat) nf).setDecimalFormatSymbols(decimalFormatSymbols);
+        }
         return nf.format(amount);
     }
 
