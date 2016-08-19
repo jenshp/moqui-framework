@@ -26,13 +26,20 @@ import org.slf4j.LoggerFactory
 class UrlResourceReference extends BaseResourceReference {
     protected final static Logger logger = LoggerFactory.getLogger(UrlResourceReference.class)
 
-    URL locationUrl = null
-    Boolean exists = null
-    boolean isFileProtocol = false
-    File localFile = null
+    protected URL locationUrl = null
+    protected Boolean exists = null
+    protected boolean isFileProtocol = false
+    protected transient File localFile = null
 
     UrlResourceReference() { }
-    
+
+    UrlResourceReference(File file, ExecutionContextFactory ecf) {
+        this.ecf = ecf
+        isFileProtocol = true
+        localFile = file
+        locationUrl = file.toURI().toURL()
+    }
+
     @Override
     ResourceReference init(String location, ExecutionContextFactory ecf) {
         this.ecf = ecf
@@ -56,6 +63,7 @@ class UrlResourceReference extends BaseResourceReference {
     }
 
     File getFile() {
+        if (!isFileProtocol) throw new IllegalArgumentException("File not supported for resource with protocol [${locationUrl.protocol}]")
         if (localFile != null) return localFile
         // NOTE: using toExternalForm().substring(5) instead of toURI because URI does not allow spaces in a filename
         localFile = new File(locationUrl.toExternalForm().substring(5))
@@ -110,14 +118,27 @@ class UrlResourceReference extends BaseResourceReference {
         if (isFileProtocol) {
             File f = getFile()
             List<ResourceReference> children = new LinkedList<ResourceReference>()
-            for (File dirFile in f.listFiles()) {
-                children.add(new UrlResourceReference().init("${getLocation()}/${dirFile.getName()}", ecf))
-            }
+            String baseLocation = getLocation()
+            if (baseLocation.endsWith("/")) baseLocation = baseLocation.substring(0, baseLocation.length() - 1)
+            for (File dirFile in f.listFiles())
+                children.add(new UrlResourceReference().init(baseLocation + "/" + dirFile.getName(), ecf))
             return children
         } else {
             throw new IllegalArgumentException("Children not supported for resource with protocol [${locationUrl.protocol}]")
         }
     }
+    @Override
+    ResourceReference getChild(String childName) {
+        if (childName == null || childName.length() == 0) return null
+        if (ecf.getResource() != null) {
+            return super.getChild(childName)
+        } else {
+            File thisFile = getFile()
+            File childFile = new File(thisFile, childName)
+            return new UrlResourceReference(childFile, ecf)
+        }
+    }
+
 
     @Override
     boolean supportsExists() { return isFileProtocol || exists != null }

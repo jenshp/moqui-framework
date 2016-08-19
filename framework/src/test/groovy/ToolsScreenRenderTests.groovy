@@ -87,9 +87,9 @@ class ToolsScreenRenderTests extends Specification {
 
         // Entity/DataEdit screens
         "Entity/DataEdit/EntityList?filterRegexp=basic" | "Enumeration" | "moqui.basic"
-        "Entity/DataEdit/EntityDetail?entityName=moqui.test.TestEntity" | "text-medium" | "date-time"
-        "Entity/DataEdit/EntityDataFind?entityName=moqui.test.TestEntity" | "Test Name A" | ""
-        "Entity/DataEdit/EntityDataEdit?testId=SVCTSTA&entityName=moqui.test.TestEntity" | "Test Name A" | ""
+        "Entity/DataEdit/EntityDetail?selectedEntity=moqui.test.TestEntity" | "text-medium" | "date-time"
+        "Entity/DataEdit/EntityDataFind?selectedEntity=moqui.test.TestEntity" | "Test Name A" | ""
+        "Entity/DataEdit/EntityDataEdit?testId=SVCTSTA&selectedEntity=moqui.test.TestEntity" | "Test Name A" | ""
 
         // Other Entity screens
         "Entity/DataExport" | "moqui.test.TestEntity" | ""
@@ -110,7 +110,7 @@ class ToolsScreenRenderTests extends Specification {
                 "User Full Name" | "Cron String"
         // run the service, then make sure it ran
         "Service/ServiceRun/run?serviceName=org.moqui.impl.UserServices.create#UserAccount&username=ScreenTest&newPassword=moqui1!&newPasswordVerify=moqui1!&userFullName=Screen Test User&emailAddress=screen@test.com" | "" | ""
-        "Entity/DataEdit/EntityDataFind?username=ScreenTest&entityName=moqui.security.UserAccount" |
+        "Entity/DataEdit/EntityDataFind?username=ScreenTest&selectedEntity=moqui.security.UserAccount" |
                 "Screen Test User" | "screen@test.com"
     }
 
@@ -118,7 +118,7 @@ class ToolsScreenRenderTests extends Specification {
         // create a DbViewEntity, set MASTER and fields, view it
         when:
         ScreenTestRender createStr = screenTest.render("DataView/FindDbView/create",
-                [dbViewEntityName: 'UomDbView', packageName: 'moqui.basic', isDataView: 'Y'], null)
+                [dbViewEntityName: 'UomDbView', packageName: 'test.basic', isDataView: 'Y'], null)
         logger.info("Called FindDbView/create in ${createStr.getRenderTime()}ms")
 
         ScreenTestRender fdvStr = screenTest.render("DataView/FindDbView", null, null)
