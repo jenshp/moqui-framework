@@ -20,14 +20,12 @@ buildscript {
 
 import org.ajoberstar.grgit.*
 
-allprojects { version = '2.0.0' }
 defaultTasks 'build'
 
 def tomcatHome = '../apache-tomcat-8.0.21'
-def warName = 'moqui-' + version + '.war'
+def getWarName() { 'moqui-' + childProjects.framework.version + '.war' }
 def plusRuntimeName = 'moqui-plus-runtime.war'
 def execTempDir = 'execwartmp'
-
 def moquiRuntime = 'runtime'
 
 def moquiConfDev = 'conf/MoquiDevConf.xml'
@@ -61,37 +59,6 @@ task cleanAll { dependsOn clean, allCleanTasks, cleanDb, cleanOrientDb, cleanEla
         cleanLoadSave, cleanPlusRuntime, cleanOther }
 
 // ========== check/update tasks ==========
-
-def checkRuntimeDirAndDefaults(String locType) {
-    Node addons = parseAddons()
-    Node myaddons = parseMyaddons()
-    if (!locType) locType = file('.git').exists() ? 'git' : 'current'
-
-    File runtimeDir = file('runtime')
-    if (!runtimeDir.exists()) {
-        Node runtimeNode = myaddons != null && myaddons.runtime ? (Node) myaddons.runtime[0] : null
-        if (runtimeNode == null) runtimeNode = addons != null && addons.runtime ? (Node) addons.runtime[0] : null
-        if (runtimeNode == null) throw new InvalidUserDataException("The runtime directory does not exist and no runtime element found in myaddons.xml or addons.xml")
-        downloadComponent("runtime", locType, runtimeNode, addons, myaddons)
-    }
-
-    // look for @default in myaddons.xml only
-    if (myaddons?.'@default') {
-        String defaultComps = myaddons.'@default'
-        Set compsChecked = new TreeSet()
-        Set defaultCompsDownloaded = new TreeSet()
-        for (String compName in defaultComps.split(',')) {
-            compName = compName.trim()
-            if (!compName) continue
-            File componentDir = file("runtime/component/${compName}")
-            if (componentDir.exists()) continue
-            getComponent(compName, locType, addons, myaddons, compsChecked)
-            defaultCompsDownloaded.add(compName)
-        }
-        if (defaultCompsDownloaded)
-            logger.lifecycle("Got default components ${defaultCompsDownloaded}, dependent components checked: ${compsChecked}")
-    }
-}
 
 task getRuntime {
     description "If the runtime directory does not exist get it using settings in myaddons.xml or addons.xml; also check default components in myaddons.xml (addons.@default) and download any missing"
@@ -168,20 +135,14 @@ task gitUpstreamAll {
 
 task run(type: JavaExec) {
     dependsOn getRuntime, allBuildTasks, cleanTempDir
-    workingDir = '.'; jvmArgs = ['-server', '-XX:MaxPermSize=192m', '-XX:-OmitStackTraceInFastThrow']; maxHeapSize = '512M'
+    workingDir = '.'; jvmArgs = ['-server', '-XX:-OmitStackTraceInFastThrow']; maxHeapSize = '512M'
     systemProperties = ['moqui.conf':moquiConfDev, 'moqui.runtime':moquiRuntime]
     // NOTE: this is a hack, using -jar instead of a class name, and then the first argument is the name of the jar file
     main = '-jar'; args = [warName]
 }
-task runStaging(type: JavaExec) {
-    dependsOn getRuntime, allBuildTasks, cleanTempDir
-    workingDir = '.'; jvmArgs = ['-server', '-XX:MaxPermSize=192m', '-Xms512M']; maxHeapSize = '512M'
-    systemProperties = ['moqui.conf':'conf/MoquiStagingConf.xml', 'moqui.runtime':moquiRuntime]
-    main = '-jar'; args = [warName]
-}
 task runProduction(type: JavaExec) {
     dependsOn getRuntime, allBuildTasks, cleanTempDir
-    workingDir = '.'; jvmArgs = ['-server', '-XX:MaxPermSize=192m', '-Xms1024M']; maxHeapSize = '1024M'
+    workingDir = '.'; jvmArgs = ['-server', '-Xms1024M']; maxHeapSize = '1024M'
     systemProperties = ['moqui.conf':moquiConfProduction, 'moqui.runtime':moquiRuntime]
     main = '-jar'; args = [warName]
 }
@@ -189,7 +150,7 @@ task runProduction(type: JavaExec) {
 task load(type: JavaExec) {
     description "Run Moqui to load data; to specify data types and tenant use something like: gradle load -Ptypes=seed -PtenantId=EXAMPLE1"
     dependsOn getRuntime, allBuildTasks
-    workingDir = '.'; jvmArgs = ['-server', '-XX:MaxPermSize=192m']; maxHeapSize = '512M'
+    workingDir = '.'; jvmArgs = ['-server']; maxHeapSize = '512M'
     systemProperties = ['moqui.conf':moquiConfDev, 'moqui.runtime':moquiRuntime]
     main = '-jar'
     def argList = [warName, '-load']
@@ -199,7 +160,7 @@ task load(type: JavaExec) {
 }
 task loadProduction(type: JavaExec) {
     dependsOn getRuntime, allBuildTasks
-    workingDir = '.'; jvmArgs = ['-server', '-XX:MaxPermSize=192m']; maxHeapSize = '512M'
+    workingDir = '.'; jvmArgs = ['-server']; maxHeapSize = '512M'
     systemProperties = ['moqui.conf':moquiConfProduction, 'moqui.runtime':moquiRuntime]
     main = '-jar'
     def argList = [warName, '-load']
@@ -208,30 +169,34 @@ task loadProduction(type: JavaExec) {
     args = argList
 }
 
-task loadSaveExec << {
-    if (file(moquiRuntime+'/db/derby/MoquiDEFAULT').exists()) ant.zip(destfile: 'SaveDEFAULT.zip') { fileset(dir: moquiRuntime+'/db/derby/MoquiDEFAULT') { include(name: '**/*') } }
-    if (file(moquiRuntime+'/db/derby/MoquiTenant').exists()) ant.zip(destfile: 'SaveTenant.zip') { fileset(dir: moquiRuntime+'/db/derby/MoquiTenant') { include(name: '**/*') } }
-    if (file(moquiRuntime+'/db/h2').exists()) ant.zip(destfile: 'SaveH2.zip') { fileset(dir: moquiRuntime+'/db/h2') { include(name: '**/*') } }
-    if (file(moquiRuntime+'/db/orientdb/databases').exists()) ant.zip(destfile: 'SaveOrientDb.zip') { fileset(dir: moquiRuntime+'/db/orientdb/databases') { include(name: '**/*') } }
-    if (file(moquiRuntime+'/elasticsearch/data').exists()) ant.zip(destfile: 'SaveElasticSearch.zip') { fileset(dir: moquiRuntime+'/elasticsearch/data') { include(name: '**/*') } }
-}
 task loadSave {
     description "Clean all, build and load, then save database (H2, Derby), OrientDB, and ElasticSearch files; to be used before reloadSave"
-    dependsOn cleanAll, load, loadSaveExec
+    dependsOn cleanAll, load
+    doLast {
+        if (file(moquiRuntime+'/db/derby/MoquiDEFAULT').exists())
+            ant.zip(destfile: 'SaveDEFAULT.zip') { fileset(dir: moquiRuntime+'/db/derby/MoquiDEFAULT') { include(name: '**/*') } }
+        if (file(moquiRuntime+'/db/derby/MoquiTenant').exists())
+            ant.zip(destfile: 'SaveTenant.zip') { fileset(dir: moquiRuntime+'/db/derby/MoquiTenant') { include(name: '**/*') } }
+        if (file(moquiRuntime+'/db/h2').exists())
+            ant.zip(destfile: 'SaveH2.zip') { fileset(dir: moquiRuntime+'/db/h2') { include(name: '**/*') } }
+        if (file(moquiRuntime+'/db/orientdb/databases').exists())
+            ant.zip(destfile: 'SaveOrientDb.zip') { fileset(dir: moquiRuntime+'/db/orientdb/databases') { include(name: '**/*') } }
+        if (file(moquiRuntime+'/elasticsearch/data').exists())
+            ant.zip(destfile: 'SaveElasticSearch.zip') { fileset(dir: moquiRuntime+'/elasticsearch/data') { include(name: '**/*') } }
+    }
 }
 
-task reloadSaveExec << {
-    if (file('SaveDEFAULT.zip').exists()) copy { from zipTree('SaveDEFAULT.zip'); into file(moquiRuntime+'/db/derby/MoquiDEFAULT') }
-    if (file('SaveTenant.zip').exists()) copy { from zipTree('SaveTenant.zip'); into file(moquiRuntime+'/db/derby/MoquiTenant') }
-    if (file('SaveH2.zip').exists()) copy { from zipTree('SaveH2.zip'); into file(moquiRuntime+'/db/h2') }
-    if (file('SaveOrientDb.zip').exists()) copy { from zipTree('SaveOrientDb.zip'); into file(moquiRuntime+'/db/orientdb/databases') }
-    if (file('SaveElasticSearch.zip').exists()) copy { from zipTree('SaveElasticSearch.zip'); into file(moquiRuntime+'/elasticsearch/data') }
-}
 task reloadSave {
     description "After a loadSave clean database (H2, Derby), OrientDB, and ElasticSearch files and reload from saved copy"
     dependsOn cleanTempDir, cleanDb, cleanOrientDb, cleanElasticSearch, cleanTxLog, cleanLog
     dependsOn allBuildTasks
-    dependsOn reloadSaveExec
+    doLast {
+        if (file('SaveDEFAULT.zip').exists()) copy { from zipTree('SaveDEFAULT.zip'); into file(moquiRuntime+'/db/derby/MoquiDEFAULT') }
+        if (file('SaveTenant.zip').exists()) copy { from zipTree('SaveTenant.zip'); into file(moquiRuntime+'/db/derby/MoquiTenant') }
+        if (file('SaveH2.zip').exists()) copy { from zipTree('SaveH2.zip'); into file(moquiRuntime+'/db/h2') }
+        if (file('SaveOrientDb.zip').exists()) copy { from zipTree('SaveOrientDb.zip'); into file(moquiRuntime+'/db/orientdb/databases') }
+        if (file('SaveElasticSearch.zip').exists()) copy { from zipTree('SaveElasticSearch.zip'); into file(moquiRuntime+'/elasticsearch/data') }
+    }
 }
 
 // ========== deploy tasks ==========
@@ -318,6 +283,10 @@ task getRelease {
     description "Get the release archive for a component, also check each component it depends on and if not present get its configured release archive; requires component property"
     doLast { getComponentTop('release') }
 }
+task getBinary {
+    description "Get the binary release archive for a component, also check each component it depends on and if not present get its configured release archive; requires component property"
+    doLast { getComponentTop('binary') }
+}
 task getGit {
     description "Clone the git repository for a component, also check each component it depends on and if not present clone its git repository; requires component property"
     doLast { getComponentTop('git') }
@@ -331,8 +300,100 @@ task getDepends {
     }
 }
 
+task getComponentSet {
+    description "Gets all components in the specied componentSet using specified location type, also check/get all components it depends on; requires component property; locationType property optional (defaults to git if there is a .git directory, otherwise to current)"
+    doLast {
+        String curLocationType = file('.git').exists() ? 'git' : 'current'
+        if (project.hasProperty('locationType')) curLocationType = locationType
+        if (!project.hasProperty('componentSet')) throw new InvalidUserDataException("No componentSet property specified")
+        checkRuntimeDirAndDefaults(curLocationType)
+        Set compsChecked = new TreeSet()
+        loadComponentSet((String) componentSet, curLocationType, parseAddons(), parseMyaddons(), compsChecked)
+        logger.lifecycle("Got component-set ${componentSet}, got or checked components: ${compsChecked}")
+    }
+}
+
+task zipComponents {
+    description "Create a .zip archive file for each component in runtime/component"
+    dependsOn allBuildTasks
+    doLast { for (File compDir in findComponentDirs()) createComponentZip(compDir) }
+}
+task zipComponent {
+    description "Create a .zip archive file a single component in runtime/component; requires component property"
+    dependsOn allBuildTasks
+    doLast {
+        if (!project.hasProperty('component')) throw new InvalidUserDataException("No component property specified")
+        createComponentZip(file('runtime/component/' + component))
+    }
+}
+
+// ========== utility methods ==========
+
+def createComponentZip(File compDir) {
+    File compXmlFile = file("${compDir.path}/component.xml")
+    if (!compXmlFile.exists()) {
+        logger.lifecycle("No component.xml file found at ${compXmlFile.path}, not creating component zip")
+        return
+    }
+    Node compXml = new XmlParser().parse(compXmlFile)
+    File zipFile = file("${compDir.parentFile.path}/${compXml.'@name'}${compXml.'@version' ? '-' + compXml.'@version' : ''}.zip")
+    if (zipFile.exists()) { logger.lifecycle("Deleting existing component zip file: ${zipFile.name}"); zipFile.delete() }
+    // exclude build, src, librepo, build.gradle, defaultexcludes (which includes .git)
+    ant.zip(destfile: zipFile.path) { fileset(dir: compDir.parentFile.path, includes: "${compDir.name}/**", defaultexcludes: 'yes',
+            excludes: "${compDir.name}/build/**,${compDir.name}/src/**,${compDir.name}/librepo/**,${compDir.name}/build.gradle") }
+    logger.lifecycle("Created component zip file: ${zipFile.name}")
+}
+
+def checkRuntimeDirAndDefaults(String locType) {
+    Node addons = parseAddons()
+    Node myaddons = parseMyaddons()
+    if (!locType) locType = file('.git').exists() ? 'git' : 'current'
+
+    File runtimeDir = file('runtime')
+    if (!runtimeDir.exists()) {
+        Node runtimeNode = myaddons != null && myaddons.runtime ? (Node) myaddons.runtime[0] : null
+        if (runtimeNode == null) runtimeNode = addons != null && addons.runtime ? (Node) addons.runtime[0] : null
+        if (runtimeNode == null) throw new InvalidUserDataException("The runtime directory does not exist and no runtime element found in myaddons.xml or addons.xml")
+        downloadComponent("runtime", locType, runtimeNode, addons, myaddons)
+    }
+
+    // look for @default in myaddons.xml only
+    if (myaddons?.'@default') {
+        String defaultComps = myaddons.'@default'
+        Set compsChecked = new TreeSet()
+        Set defaultCompsDownloaded = new TreeSet()
+        for (String compName in defaultComps.split(',')) {
+            compName = compName.trim()
+            if (!compName) continue
+            File componentDir = file("runtime/component/${compName}")
+            if (componentDir.exists()) continue
+            getComponent(compName, locType, addons, myaddons, compsChecked)
+            defaultCompsDownloaded.add(compName)
+        }
+        if (defaultCompsDownloaded)
+            logger.lifecycle("Got default components ${defaultCompsDownloaded}, dependent components checked: ${compsChecked}")
+    }
+}
+
+def loadComponentSet(String setName, String curLocationType, Node addons, Node myaddons, Set compsChecked) {
+    Node setNode = null
+    if (myaddons) setNode = myaddons.'component-set'.find({ it."@name" == setName })
+    if (setNode == null) setNode = addons.'component-set'.find({ it."@name" == setName })
+    if (setNode == null) throw new InvalidUserDataException("Could not find component-set with name ${setName}")
+    String components = setNode.'@components'
+    if (components) for (String compName in components.split(","))
+        getComponent(compName, curLocationType, addons, myaddons, compsChecked)
+    String sets = setNode.'@sets'
+    if (sets) for (String subsetName in sets.split(","))
+        loadComponentSet(subsetName, curLocationType, addons, myaddons, compsChecked)
+}
+
+Collection<File> findComponentDirs() {
+    file('runtime/component').listFiles().findAll({ it.isDirectory() && it.listFiles().find({ it.name == 'component.xml' }) })
+}
 Node parseAddons() { new XmlParser().parse(file('addons.xml')) }
 Node parseMyaddons() { if (file('myaddons.xml').exists()) { new XmlParser().parse(file('myaddons.xml')) } else { null } }
+Node parseComponent(project) { new XmlParser().parse(project.file('component.xml')) }
 
 def getComponentTop(String locationType) {
     if (project.hasProperty('component')) {
@@ -370,7 +431,7 @@ File downloadComponent(String targetDirPath, String type, Node component, Node a
 
     File targetDir = file(targetDirPath)
     if (targetDir.exists()) { logger.lifecycle("Component ${compName} already exists at ${targetDir}"); return targetDir }
-    if (type == 'current' || type == 'release') {
+    if (type in ['current', 'release', 'binary']) {
         File zipFile = file("${targetDirPath}.zip")
         ant.get(src: url, dest: zipFile)
         // the eachFile closure removes the first path from each file, moving everything up a directory
@@ -407,7 +468,7 @@ def checkAllComponentDependencies(String type) {
     Node addons = parseAddons()
     Node myaddons = parseMyaddons()
     Set compsChecked = new TreeSet()
-    for (File compDir in file('runtime/component').listFiles().findAll { it.isDirectory() && it.listFiles().find { it.name == 'component.xml' } }) {
+    for (File compDir in findComponentDirs()) {
         checkComponentDependencies(compDir.name, type, addons, myaddons, compsChecked)
     }
     logger.lifecycle("Dependent components checked: ${compsChecked}")

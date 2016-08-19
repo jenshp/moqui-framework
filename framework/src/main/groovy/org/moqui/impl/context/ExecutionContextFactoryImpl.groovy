@@ -28,20 +28,23 @@ import org.moqui.entity.EntityValue
 import org.moqui.impl.StupidClassLoader
 import org.moqui.impl.StupidJavaUtilities
 import org.moqui.impl.StupidUtilities
-import org.moqui.impl.StupidWebUtilities
 import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.reference.UrlResourceReference
 import org.moqui.impl.entity.EntityFacadeImpl
 import org.moqui.impl.entity.EntityValueBase
 import org.moqui.impl.screen.ScreenFacadeImpl
 import org.moqui.impl.service.ServiceFacadeImpl
+import org.moqui.impl.webapp.NotificationWebSocketListener
 import org.moqui.screen.ScreenFacade
 import org.moqui.service.ServiceFacade
 import org.moqui.util.MNode
+import org.moqui.util.SimpleTopic
 import org.moqui.util.SystemBinding
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
+import javax.servlet.ServletContext
+import javax.websocket.server.ServerContainer
 import java.sql.Timestamp
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ExecutorService
@@ -51,6 +54,8 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.jar.JarFile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 
 @CompileStatic
 class ExecutionContextFactoryImpl implements ExecutionContextFactory {
@@ -65,7 +70,8 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
     protected final MNode confXmlRoot
     protected MNode serverStatsNode
 
-    protected StupidClassLoader cachedClassLoader
+    protected StupidClassLoader stupidClassLoader
+    protected GroovyClassLoader groovyClassLoader
     protected InetAddress localhostAddress = null
 
     protected LinkedHashMap<String, ComponentInfo> componentInfoMap = new LinkedHashMap<>()
@@ -94,6 +100,14 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     /** The SecurityManager for Apache Shiro */
     protected org.apache.shiro.mgt.SecurityManager internalSecurityManager
+    /** The ServletContext, if Moqui was initialized in a webapp (generally through MoquiContextListener) */
+    protected ServletContext internalServletContext = null
+    /** The WebSocket ServerContainer, if found in 'javax.websocket.server.ServerContainer' ServletContext attribute */
+    protected ServerContainer internalServerContainer = null
+
+    /** Notification Message Topic (for distributed notifications) */
+    private SimpleTopic<NotificationMessageImpl> notificationMessageTopic = null
+    private NotificationWebSocketListener notificationWebSocketListener = new NotificationWebSocketListener()
 
     // ======== Permanent Delegated Facades ========
     @SuppressWarnings("GrFinalVariableAccess")
@@ -128,7 +142,11 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
         // if there is a system property use that, otherwise from the properties file
         runtimePath = System.getProperty("moqui.runtime")
-        if (!runtimePath) runtimePath = moquiInitProperties.getProperty("moqui.runtime")
+        if (!runtimePath) {
+            runtimePath = moquiInitProperties.getProperty("moqui.runtime")
+            // if there was no system property set one, make sure at least something is always set for conf files/etc
+            if (runtimePath) System.setProperty("moqui.runtime", runtimePath)
+        }
         if (!runtimePath) throw new IllegalArgumentException("No moqui.runtime property found in MoquiInit.properties or in a system property (with: -Dmoqui.runtime=... on the command line)")
         if (runtimePath.endsWith("/")) runtimePath = runtimePath.substring(0, runtimePath.length()-1)
 
@@ -247,9 +265,10 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
     }
 
     protected MNode initBaseConfig(MNode runtimeConfXmlRoot) {
-        // always set the full moqui.runtime, moqui.conf system properties for use in various places
-        System.setProperty("moqui.runtime", runtimePath)
-        System.setProperty("moqui.conf", runtimeConfPath)
+        // don't set the moqui.runtime and moqui.conf system properties as before, causes conflict with multiple moqui instances in one JVM
+        // NOTE: moqui.runtime is set in MoquiStart and in MoquiContextListener (if there is an embedded runtime directory)
+        // System.setProperty("moqui.runtime", runtimePath)
+        // System.setProperty("moqui.conf", runtimeConfPath)
 
         logger.info("Initializing Moqui ExecutionContextFactoryImpl\n - runtime directory: ${this.runtimePath}\n - runtime config:    ${this.runtimeConfPath}")
 
@@ -287,9 +306,6 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         // merge the runtime conf file into the default one to override any settings (they both have the same root node, go from there)
         logger.info("Merging runtime configuration at ${runtimeConfPath}")
         mergeConfigNodes(baseConfigNode, runtimeConfXmlRoot)
-
-        // TODO: add some conf or runtime option to log the full config after merge?
-        // logger.info("Configuration after all merges:\n${baseConfigNode.toString()}")
 
         // set default System properties now that all is merged
         for (MNode defPropNode in baseConfigNode.children("default-property")) {
@@ -350,10 +366,8 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         skipStatsCond = serverStatsNode.attribute("stats-skip-condition")
         hitBinLengthMillis = (serverStatsNode.attribute("bin-length-seconds") as Integer)*1000 ?: 900000
 
-        // init ESAPI - NOTE: this should be the first call to anything related to ESAPI or StupidWebUtilities so config is in place
-        if (!System.getProperty("org.owasp.esapi.resources")) System.setProperty("org.owasp.esapi.resources", runtimePath + "/conf/esapi")
-        logger.info("Starting ESAPI, resources at ${System.getProperty("org.owasp.esapi.resources")}")
-        StupidWebUtilities.canonicalizeValue("test")
+        // register notificationWebSocketListener
+        registerNotificationMessageListener(notificationWebSocketListener)
 
         // Load ToolFactory implementations from tools.tool-factory elements, run preFacadeInit() methods
         ArrayList<Map<String, String>> toolFactoryAttrsList = new ArrayList<>()
@@ -379,7 +393,6 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
     }
 
     private void postFacadeInit() {
-
         // ========== load a few things in advance so first page hit is faster in production (in dev mode will reload anyway as caches timeout)
         // load entity defs
         logger.info("Loading entity definitions")
@@ -404,6 +417,11 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             }
         }
 
+        // Notification Message Topic
+        String notificationTopicFactory = confXmlRoot.first("tools").attribute("notification-topic-factory")
+        if (notificationTopicFactory)
+            notificationMessageTopic = (SimpleTopic<NotificationMessageImpl>) getTool(notificationTopicFactory, SimpleTopic.class)
+
         // Warm cache on start if configured to do so
         if (confXmlRoot.first("cache-list").attribute("warm-on-start") != "false") warmCache()
     }
@@ -417,17 +435,18 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
     /** Setup the cached ClassLoader, this should init in the main thread so we can set it properly */
     private void initClassLoader() {
         ClassLoader pcl = (Thread.currentThread().getContextClassLoader() ?: this.class.classLoader) ?: System.classLoader
-        cachedClassLoader = new StupidClassLoader(pcl)
+        stupidClassLoader = new StupidClassLoader(pcl)
+        groovyClassLoader = new GroovyClassLoader(stupidClassLoader)
         // add runtime/classes jar files to the class loader
         File runtimeClassesFile = new File(runtimePath + "/classes")
         if (runtimeClassesFile.exists()) {
-            cachedClassLoader.addClassesDirectory(runtimeClassesFile)
+            stupidClassLoader.addClassesDirectory(runtimeClassesFile)
         }
         // add runtime/lib jar files to the class loader
         File runtimeLibFile = new File(runtimePath + "/lib")
         if (runtimeLibFile.exists()) for (File jarFile: runtimeLibFile.listFiles()) {
             if (jarFile.getName().endsWith(".jar")) {
-                cachedClassLoader.addJarFile(new JarFile(jarFile))
+                stupidClassLoader.addJarFile(new JarFile(jarFile))
                 logger.info("Added JAR from runtime/lib: ${jarFile.getName()}")
             }
         }
@@ -436,7 +455,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         for (ComponentInfo ci in componentInfoMap.values()) {
             ResourceReference classesRr = ci.componentRr.getChild("classes")
             if (classesRr.exists && classesRr.supportsDirectory() && classesRr.isDirectory()) {
-                cachedClassLoader.addClassesDirectory(new File(classesRr.getUri()))
+                stupidClassLoader.addClassesDirectory(new File(classesRr.getUri()))
             }
 
             ResourceReference libRr = ci.componentRr.getChild("lib")
@@ -445,7 +464,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
                 for (ResourceReference jarRr: libRr.getDirectoryEntries()) {
                     if (jarRr.fileName.endsWith(".jar")) {
                         try {
-                            cachedClassLoader.addJarFile(new JarFile(new File(jarRr.getUrl().getPath())))
+                            stupidClassLoader.addJarFile(new JarFile(new File(jarRr.getUrl().getPath())))
                             jarsLoaded.add(jarRr.getFileName())
                         } catch (Exception e) {
                             logger.error("Could not load JAR from component ${ci.name}: ${jarRr.getLocation()}: ${e.toString()}")
@@ -456,8 +475,10 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             }
         }
 
+        // clear not found info just in case anything was falsely added
+        stupidClassLoader.clearNotFoundInfo()
         // set as context classloader
-        Thread.currentThread().setContextClassLoader(cachedClassLoader)
+        Thread.currentThread().setContextClassLoader(groovyClassLoader)
     }
 
     /** Called from MoquiContextListener.contextInitialized after ECFI init */
@@ -576,11 +597,39 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     InetAddress getLocalhostAddress() { return localhostAddress }
 
+    @Override
     void registerNotificationMessageListener(NotificationMessageListener nml) {
         nml.init(this)
         registeredNotificationMessageListeners.add(nml)
     }
-    List<NotificationMessageListener> getNotificationMessageListeners() { return registeredNotificationMessageListeners }
+    /** Called by NotificationMessageImpl.send(), send to topic (possibly distributed) */
+    void sendNotificationMessageToTopic(NotificationMessageImpl nmi) {
+        if (notificationMessageTopic != null) {
+            // send it to the topic, this will call notifyNotificationMessageListeners(nmi)
+            notificationMessageTopic.publish(nmi)
+            // logger.warn("Sent nmi to distributed topic, topic=${nmi.topic}, tenant=${nmi.tenantId}")
+        } else {
+            // run it locally
+            notifyNotificationMessageListeners(nmi)
+        }
+    }
+    /** This is called when message received from topic (possibly distributed) */
+    void notifyNotificationMessageListeners(NotificationMessageImpl nmi) {
+        if (nmi.tenantId == null) {
+            logger.warn("Received NotificationMessageImpl message on topic ${nmi.topic} with null tenantId, ignoring")
+            return
+        }
+        // process notifications in the worker thread pool
+        ExecutionContextImpl.ThreadPoolRunnable runnable = new ExecutionContextImpl.ThreadPoolRunnable(this, nmi.tenantId, null, {
+            int nmlSize = registeredNotificationMessageListeners.size()
+            for (int i = 0; i < nmlSize; i++) {
+                NotificationMessageListener nml = (NotificationMessageListener) registeredNotificationMessageListeners.get(i)
+                nml.onMessage(nmi)
+            }
+        })
+        workerPool.execute(runnable)
+    }
+    NotificationWebSocketListener getNotificationWebSocketListener() { return notificationWebSocketListener }
 
     org.apache.shiro.mgt.SecurityManager getSecurityManager() {
         if (internalSecurityManager != null) return internalSecurityManager
@@ -626,6 +675,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     CacheFacadeImpl getCacheFacade() { return this.cacheFacade }
 
+    Collection<EntityFacadeImpl> getAllEntityFacades() { entityFacadeByTenantMap.values() }
     EntityFacadeImpl getEntityFacade() { return getEntityFacade(getExecutionContext().getTenantId()) }
     EntityFacadeImpl getEntityFacade(String tenantId) {
         // this should never happen, may want to default to tenantId=DEFAULT, but to see if it happens anywhere throw for now
@@ -663,8 +713,8 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         if (ec != null) return ec
 
         if (logger.traceEnabled) logger.trace("Creating new ExecutionContext in thread [${Thread.currentThread().id}:${Thread.currentThread().name}]")
-        if (!(Thread.currentThread().getContextClassLoader() instanceof StupidClassLoader))
-            Thread.currentThread().setContextClassLoader(cachedClassLoader)
+        if (!Thread.currentThread().getContextClassLoader().is(groovyClassLoader))
+            Thread.currentThread().setContextClassLoader(groovyClassLoader)
         ec = new ExecutionContextImpl(this)
         this.activeContext.set(ec)
         return ec
@@ -691,10 +741,10 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         return toolFactory
     }
     @Override
-    <V> V getTool(String toolName, Class<V> instanceClass) {
+    <V> V getTool(String toolName, Class<V> instanceClass, Object... parameters) {
         ToolFactory<V> toolFactory = (ToolFactory<V>) toolFactoryMap.get(toolName)
         if (toolFactory == null) throw new IllegalArgumentException("No ToolFactory found with name ${toolName}")
-        return toolFactory.getInstance()
+        return toolFactory.getInstance(parameters)
     }
 
     /*
@@ -784,17 +834,32 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
                 TreeMap<String, ResourceReference> componentDirEntries = new TreeMap<String, ResourceReference>()
                 for (ResourceReference componentSubRr in componentRr.getDirectoryEntries()) {
                     // if it's a directory and doesn't start with a "." then add it as a component dir
-                    if (!componentSubRr.isDirectory() || componentSubRr.getFileName().startsWith(".")) continue
+                    String subRrName = componentSubRr.getFileName()
+                    if ((!componentSubRr.isDirectory() && !subRrName.endsWith(".zip")) || subRrName.startsWith(".")) continue
                     componentDirEntries.put(componentSubRr.getFileName(), componentSubRr)
                 }
-                for (Map.Entry<String, ResourceReference> componentDirEntry in componentDirEntries) {
-                    ComponentInfo componentInfo = new ComponentInfo(componentDirEntry.getValue().getLocation(), this)
+                for (Map.Entry<String, ResourceReference> componentDirEntry in componentDirEntries.entrySet()) {
+                    String compName = componentDirEntry.value.getFileName()
+                    // skip zip files that already have a matching directory
+                    if (compName.endsWith(".zip")) {
+                        String compNameNoZip = stripVersionFromName(compName.substring(0, compName.length() - 4))
+                        if (componentDirEntries.containsKey(compNameNoZip)) continue
+                    }
+                    ComponentInfo componentInfo = new ComponentInfo(componentDirEntry.value.location, this)
                     this.addComponent(componentInfo)
                 }
             }
         }
     }
 
+    protected static String stripVersionFromName(String name) {
+        int lastDash = name.lastIndexOf("-")
+        if (lastDash > 0 && lastDash < name.length() - 2 && Character.isDigit(name.charAt(lastDash + 1))) {
+            return name.substring(0, lastDash)
+        } else {
+            return name
+        }
+    }
     protected ResourceReference getResourceReference(String location) {
         // TODO: somehow support other resource location types
         // the ResourceFacade inits after components are loaded (so it is aware of initial components), so we can't get ResourceReferences from it
@@ -823,12 +888,53 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             location = specLoc ?: origNode?.attribute("location")
             if (!location) throw new IllegalArgumentException("Cannot init component with no location (not specified or found in component.@location)")
 
+            // support component zip files, expand now and replace name and location
+            if (location.endsWith(".zip")) {
+                ResourceReference zipRr = ecfi.getResourceReference(location)
+                if (!zipRr.supportsExists()) throw new IllegalArgumentException("Could component location ${location} does not support exists, cannot use as a component location")
+                // make sure corresponding directory does not exist
+                String locNoZip = stripVersionFromName(location.substring(0, location.length() - 4))
+                ResourceReference noZipRr = ecfi.getResourceReference(locNoZip)
+                if (zipRr.getExists() && !noZipRr.getExists()) {
+                    // NOTE: could use getPath() instead of toExternalForm().substring(5) for file specific URLs, will work on Windows?
+                    String zipPath = zipRr.getUrl().toExternalForm().substring(5)
+                    File zipFile = new File(zipPath)
+                    String targetDirLocation = zipFile.getParent()
+                    logger.info("Expanding component archive ${zipRr.getFileName()} to ${targetDirLocation}")
+
+                    ZipInputStream zipIn = new ZipInputStream(zipRr.openStream())
+                    try {
+                        ZipEntry entry = zipIn.getNextEntry()
+                        // iterates over entries in the zip file
+                        while (entry != null) {
+                            ResourceReference entryRr = ecfi.getResourceReference(targetDirLocation + '/' + entry.getName())
+                            String filePath = entryRr.getUrl().toExternalForm().substring(5)
+                            if (entry.isDirectory()) {
+                                File dir = new File(filePath)
+                                dir.mkdir()
+                            } else {
+                                OutputStream os = new FileOutputStream(filePath)
+                                StupidUtilities.copyStream(zipIn, os)
+                            }
+                            zipIn.closeEntry()
+                            entry = zipIn.getNextEntry()
+                        }
+                    } finally {
+                        zipIn.close()
+                    }
+                }
+
+                // assumes zip contains a single directory named the same as the component name (without version)
+                location = locNoZip
+            }
+
             // clean up the location
             if (location.endsWith('/')) location = location.substring(0, location.length()-1)
             int lastSlashIndex = location.lastIndexOf('/')
             if (lastSlashIndex < 0) {
                 // if this happens the component directory is directly under the runtime directory, so prefix loc with that
                 location = ecfi.runtimePath + '/' + location
+                lastSlashIndex = location.lastIndexOf('/')
             }
             // set the default component name
             name = location.substring(lastSlashIndex+1)
@@ -862,7 +968,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             for (String dependsOnName in dependsOnNames) {
                 ComponentInfo depCompInfo = ecfi.componentInfoMap.get(dependsOnName)
                 if (depCompInfo == null)
-                    throw new IllegalArgumentException("Component ${name} depends on component ${dependsOnName} which is not initialized")
+                    throw new IllegalArgumentException("Component ${name} depends on component ${dependsOnName} which is not initialized; try running 'gradle getDepends'")
                 List<String> childDepList = depCompInfo.getRecursiveDependencies()
                 for (String childDep in childDepList)
                     if (!dependsOnList.contains(childDep)) dependsOnList.add(childDep)
@@ -886,27 +992,36 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     @Override
     L10nFacade getL10n() { getEci().getL10nFacade() }
-
     @Override
-    ResourceFacade getResource() { return resourceFacade }
-
+    ResourceFacade getResource() { resourceFacade }
     @Override
-    LoggerFacade getLogger() { return loggerFacade }
-
+    LoggerFacade getLogger() { loggerFacade }
     @Override
-    CacheFacade getCache() { return this.cacheFacade }
-
+    CacheFacade getCache() { this.cacheFacade }
     @Override
-    TransactionFacade getTransaction() { return transactionFacade }
-
+    TransactionFacade getTransaction() { transactionFacade }
     @Override
     EntityFacade getEntity() { getEntityFacade(getExecutionContext()?.getTenantId()) }
+    @Override
+    EntityFacade getEntity(String tenantId) { getEntityFacade(tenantId) }
+    @Override
+    ServiceFacade getService() { serviceFacade }
+    @Override
+    ScreenFacade getScreen() { screenFacade }
 
     @Override
-    ServiceFacade getService() { return serviceFacade }
+    ClassLoader getClassLoader() { groovyClassLoader }
+    @Override
+    GroovyClassLoader getGroovyClassLoader() { groovyClassLoader }
 
     @Override
-    ScreenFacade getScreen() { return screenFacade }
+    ServletContext getServletContext() { internalServletContext }
+    @Override
+    ServerContainer getServerContainer() { internalServerContainer }
+    void initServletContext(ServletContext sc) {
+        internalServletContext = sc
+        internalServerContainer = (ServerContainer) sc.getAttribute("javax.websocket.server.ServerContainer")
+    }
 
     // ========== Server Stat Tracking ==========
     boolean getSkipStats() {
@@ -1371,6 +1486,8 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             for (MNode upNode in overrideNode.children("url-pattern")) childBaseNode.append(upNode.deepCopy(null))
         })
         baseNode.mergeSingleChild(overrideNode, "session-config")
+
+        baseNode.mergeChildrenByKey(overrideNode, "endpoint", "path", null)
     }
 
     protected static void mergeWebappActions(MNode baseWebappNode, MNode overrideWebappNode, String childNodeName) {

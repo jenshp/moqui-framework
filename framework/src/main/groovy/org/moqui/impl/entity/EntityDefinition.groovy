@@ -75,6 +75,7 @@ public class EntityDefinition {
     protected MNode entityHavingEconditions = null
 
     protected final boolean isView
+    protected final boolean isDynamicView
     protected final boolean hasFunctionAliasVal
     protected final boolean createOnlyVal
     protected boolean createOnlyFields = false
@@ -105,17 +106,19 @@ public class EntityDefinition {
         // copy the entityNode because we may be modifying it
         internalEntityNode = entityNode.deepCopy(null)
         isView = internalEntityNode.name == "view-entity"
+        isDynamicView = internalEntityNode.attribute("is-dynamic-view") == "true"
         internalEntityName = internalEntityNode.attribute("entity-name")
-        fullEntityName = internalEntityNode.attribute("package-name") + "." + internalEntityName
+        String packageName = internalEntityNode.attribute("package") ?: internalEntityNode.attribute("package-name")
+        fullEntityName = packageName + "." + internalEntityName
         shortAlias = internalEntityNode.attribute("short-alias") ?: null
 
-        if (internalEntityNode.attribute("is-dynamic-view") == "true") {
+        if (isDynamicView) {
             // use the group of the first member-entity
             String memberEntityName = internalEntityNode.children("member-entity")
                     .find({ !it.attribute("join-from-alias") })?.attribute("entity-name")
             groupName = efi.getEntityGroupName(memberEntityName)
         } else {
-            groupName = internalEntityNode.attribute("group-name") ?: efi.getDefaultGroupName()
+            groupName = internalEntityNode.attribute("group") ?: internalEntityNode.attribute("group-name") ?: efi.getDefaultGroupName()
         }
         datasourceFactory = efi.getDatasourceFactory(groupName)
 
@@ -163,7 +166,7 @@ public class EntityDefinition {
             memberEntityFieldAliases = [:]
             memberEntityAliasMap = [:]
 
-            // get group-name, etc from member-entity
+            // get group, etc from member-entity
             Set<String> allGroupNames = new TreeSet<>()
             for (MNode memberEntity in internalEntityNode.children("member-entity")) {
                 String memberEntityName = memberEntity.attribute("entity-name")
@@ -171,13 +174,13 @@ public class EntityDefinition {
                 EntityDefinition memberEd = this.efi.getEntityDefinition(memberEntityName)
                 if (memberEd == null) throw new EntityException("No definition found for member entity alias ${memberEntity.attribute("entity-alias")} name ${memberEntityName} in view-entity ${fullEntityName}")
                 MNode memberEntityNode = memberEd.getEntityNode()
-                String groupNameAttr = memberEntityNode.attribute("group-name")
+                String groupNameAttr = memberEntityNode.attribute("group") ?: memberEntityNode.attribute("group-name")
                 if (groupNameAttr == null || groupNameAttr.length() == 0) {
-                    // use the default group-name
+                    // use the default group
                     groupNameAttr = efi.getDefaultGroupName()
                 }
                 // only set on view-entity for the first one
-                if (allGroupNames.size() == 0) internalEntityNode.attributes.put("group-name", groupNameAttr)
+                if (allGroupNames.size() == 0) internalEntityNode.attributes.put("group", groupNameAttr)
                 // remember all group names applicable to the view entity
                 allGroupNames.add(groupNameAttr)
 
@@ -191,20 +194,19 @@ public class EntityDefinition {
             this.expandAliasAlls()
             // set @type, set is-pk on all alias Nodes if the related field is-pk
             for (MNode aliasNode in internalEntityNode.children("alias")) {
-                MNode memberEntity = memberEntityAliasMap.get(aliasNode.attribute("entity-alias"))
-                if (memberEntity == null) {
-                    if (aliasNode.hasChild("complex-alias")) {
-                        continue
-                    } else {
-                        throw new EntityException("Could not find member-entity with entity-alias [${aliasNode.attribute("entity-alias")}] in view-entity [${internalEntityName}]")
-                    }
-                }
+                if (aliasNode.hasChild("complex-alias") || aliasNode.hasChild("case")) continue
+
+                String entityAlias = aliasNode.attribute("entity-alias")
+                MNode memberEntity = memberEntityAliasMap.get(entityAlias)
+                if (memberEntity == null) throw new EntityException("Could not find member-entity with entity-alias ${entityAlias} in view-entity ${internalEntityName}")
+
                 EntityDefinition memberEd = this.efi.getEntityDefinition(memberEntity.attribute("entity-name"))
                 String fieldName = aliasNode.attribute("field") ?: aliasNode.attribute("name")
                 MNode fieldNode = memberEd.getFieldNode(fieldName)
                 if (fieldNode == null) throw new EntityException("In view-entity [${internalEntityName}] alias [${aliasNode.attribute("name")}] referred to field [${fieldName}] that does not exist on entity [${memberEd.internalEntityName}].")
                 if (!aliasNode.attribute("type")) aliasNode.attributes.put("type", fieldNode.attribute("type"))
                 if (fieldNode.attribute("is-pk") == "true") aliasNode.attributes.put("is-pk", "true")
+                if (fieldNode.attribute("enable-localization") == "true") aliasNode.attributes.put("enable-localization", "true")
 
                 // add to aliases by field name by entity name
                 if (!memberEntityFieldAliases.containsKey(memberEd.getFullEntityName())) memberEntityFieldAliases.put(memberEd.getFullEntityName(), [:])
@@ -257,6 +259,7 @@ public class EntityDefinition {
     MNode getEntityNode() { return internalEntityNode }
 
     boolean isViewEntity() { return isView }
+    boolean isDynamicViewEntity() { return isDynamicView }
     boolean hasFunctionAlias() { return hasFunctionAliasVal }
     Map<String, ArrayList<MNode>> getMemberFieldAliases(String memberEntityName) {
         return memberEntityFieldAliases?.get(memberEntityName)
@@ -278,6 +281,11 @@ public class EntityDefinition {
         // no description? just use the first non-pk field: nonPkFields.get(0)
         // not any more, can be confusing... just return empty String
         return ""
+    }
+
+    String getMemberEntityName(String entityAlias) {
+        MNode memberEntityNode = memberEntityAliasMap.get(entityAlias)
+        return memberEntityNode?.attribute("entity-name")
     }
 
     boolean createOnly() { return createOnlyVal }
@@ -373,7 +381,7 @@ public class EntityDefinition {
         fi.type = fnAttrs.get('type')
         fi.columnName = fnAttrs.get('column-name') ?: camelCaseToUnderscored(fi.name)
         fi.defaultStr = fnAttrs.get('default')
-        if (!fi.type && fieldNode.hasChild("complex-alias") && fnAttrs.get('function')) {
+        if (!fi.type && (fieldNode.hasChild("complex-alias") || fieldNode.hasChild("case")) && fnAttrs.get('function')) {
             // this is probably a calculated value, just default to number-decimal
             fi.type = 'number-decimal'
         }
@@ -392,44 +400,18 @@ public class EntityDefinition {
         fi.createOnly = fnAttrs.get('create-only') ? 'true'.equals(fnAttrs.get('create-only')) : ed.createOnly()
         fi.enableAuditLog = fieldNode.attribute('enable-audit-log') ?: ed.internalEntityNode.attribute('enable-audit-log')
 
+        fi.setFullColumnName(ed.makeFullColumnName(fieldNode))
         if (ed.isViewEntity()) {
-            // NOTE: for view-entity the incoming fieldNode will actually be for an alias element
-            StringBuilder colNameBuilder = new StringBuilder()
-            /*
-            if (includeFunctionAndComplex) {
-                // column name for view-entity (prefix with "${entity-alias}.")
-                //colName.append(fieldNode."@entity-alias").append('.')
-                if (logger.isTraceEnabled()) logger.trace("For view-entity include function and complex not yet supported, for entity [${internalEntityName}], may get bad SQL...")
+            String entityAlias = fieldNode.attribute('entity-alias')
+            if (entityAlias != null && entityAlias.length() > 0) fi.entityAliasUsedSet.add(entityAlias)
+
+            ArrayList<MNode> cafList = fieldNode.depthFirst({ MNode it -> "complex-alias-field".equals(it.name) })
+            int cafListSize = cafList.size()
+            for (int i = 0; i < cafListSize; i++) {
+                MNode cafNode = (MNode) cafList.get(i)
+                String cafEntityAlias = cafNode.attribute('entity-alias')
+                if (cafEntityAlias != null && cafEntityAlias.length() > 0) fi.entityAliasUsedSet.add(cafEntityAlias)
             }
-            // else {
-            */
-
-            if (fieldNode.hasChild('complex-alias')) {
-                String function = fieldNode.attribute('function')
-                if (function) {
-                    colNameBuilder.append(getFunctionPrefix(function))
-                }
-                ed.buildComplexAliasName(fieldNode, "+", colNameBuilder)
-                if (function) colNameBuilder.append(')')
-            } else {
-                String function = fieldNode.attribute('function')
-                if (function) {
-                    colNameBuilder.append(getFunctionPrefix(function))
-                }
-                // column name for view-entity (prefix with "${entity-alias}.")
-                colNameBuilder.append(fieldNode.attribute('entity-alias')).append('.')
-
-                String memberFieldName = fieldNode.attribute('field') ?: fieldNode.attribute('name')
-                colNameBuilder.append(ed.getBasicFieldColName(ed.internalEntityNode,
-                        (String) fieldNode.attribute('entity-alias'), memberFieldName))
-
-                if (function) colNameBuilder.append(')')
-            }
-
-            // }
-            fi.fullColumnName = colNameBuilder.toString()
-        } else {
-            fi.fullColumnName = fi.columnName
         }
 
         return fi
@@ -460,7 +442,7 @@ public class EntityDefinition {
         } else {
             for (MNode keyMap in keyMapList) {
                 String fieldName = keyMap.attribute('field-name')
-                String relFn = keyMap.attribute('related-field-name') ?: fieldName
+                String relFn = keyMap.attribute('related') ?: keyMap.attribute('related-field-name') ?: fieldName
                 if (!relEd.isField(relFn) && ((String) relationship.attribute('type')).startsWith("one")) {
                     List<String> pks = relEd.getPkFieldNames()
                     if (pks.size() == 1) relFn = pks.get(0)
@@ -549,7 +531,7 @@ public class EntityDefinition {
             type = relNode.attribute('type')
             isTypeOne = type.startsWith("one")
             title = relNode.attribute('title') ?: ''
-            relatedEntityName = relNode.attribute('related-entity-name')
+            relatedEntityName = relNode.attribute('related') ?: relNode.attribute('related-entity-name')
             relatedEd = efi.getEntityDefinition(relatedEntityName)
             if (relatedEd == null) throw new EntityNotFoundException("Invalid entity relationship, ${relatedEntityName} not found in definition for entity ${fromEd.getFullEntityName()}")
             relatedEntityName = relatedEd.getFullEntityName()
@@ -570,9 +552,10 @@ public class EntityDefinition {
 
         private boolean hasReverse() {
             MNode reverseRelNode = relatedEd.internalEntityNode.children("relationship").find(
-                    { ((it.attribute("related-entity-name") == fromEd.internalEntityName || it.attribute("related-entity-name") == fromEd.fullEntityName)
+                    { String related = it.attribute("related") ?: it.attribute("related-entity-name");
+                      return ((related == fromEd.internalEntityName || related == fromEd.fullEntityName)
                             && (it.attribute("type") == "one" || it.attribute("type") == "one-nofk")
-                            && ((!title && !it.attribute("title")) || it.attribute("title") == title)) })
+                            && ((!title && !it.attribute("title")) || it.attribute("title") == title)); })
             return reverseRelNode != null
         }
 
@@ -614,7 +597,13 @@ public class EntityDefinition {
         MasterDefinition(EntityDefinition ed, MNode masterNode) {
             name = masterNode.attribute("name") ?: "default"
             List<MNode> detailNodeList = masterNode.children("detail")
-            for (MNode detailNode in detailNodeList) detailList.add(new MasterDetail(ed, detailNode))
+            for (MNode detailNode in detailNodeList) {
+                try {
+                    detailList.add(new MasterDetail(ed, detailNode))
+                } catch (Exception e) {
+                    logger.error("Error adding detail ${detailNode.attribute("relationship")} to master ${name} of entity ${ed.getFullEntityName()}: ${e.toString()}")
+                }
+            }
         }
     }
     @CompileStatic
@@ -751,7 +740,7 @@ public class EntityDefinition {
         if (fieldInfo == null) {
             throw new EntityException("Invalid field-name [${fieldName}] for the [${this.getFullEntityName()}] entity")
         }
-        return fieldInfo.fullColumnName
+        return fieldInfo.getFullColumnName()
     }
 
     protected String getBasicFieldColName(MNode entityNode, String entityAlias, String fieldName) {
@@ -761,20 +750,80 @@ public class EntityDefinition {
         return memberEd.getColumnName(fieldName, false)
     }
 
-    protected void buildComplexAliasName(MNode parentNode, String operator, StringBuilder colNameBuilder) {
-        //TODO expand expression against current context
-        colNameBuilder.append(parentNode.attribute('expression') ?: '')
-        if (parentNode.children.isEmpty()) {
-            return
-        }
-        colNameBuilder.append('(')
-        boolean isFirst = true
-        for (MNode childNode in parentNode.children) {
-            if (isFirst) isFirst=false else colNameBuilder.append(' ').append(operator).append(' ')
+    protected String makeFullColumnName(MNode fieldNode) {
+        if (isViewEntity()) {
+            // NOTE: for view-entity the incoming fieldNode will actually be for an alias element
+            StringBuilder colNameBuilder = new StringBuilder()
 
-            if (childNode.name == "complex-alias") {
-                buildComplexAliasName(childNode, (String) childNode.attribute("operator"), colNameBuilder)
-            } else if (childNode.name == "complex-alias-field") {
+            MNode caseNode = fieldNode.first("case")
+            MNode complexAliasNode = fieldNode.first("complex-alias")
+            String function = fieldNode.attribute('function')
+            boolean hasFunction = function != null && function.length() > 0
+
+            if (hasFunction) colNameBuilder.append(getFunctionPrefix(function))
+            if (caseNode != null) {
+                colNameBuilder.append("CASE")
+                String caseExpr = caseNode.attribute("expression")
+                if (caseExpr != null) colNameBuilder.append(" ").append(caseExpr)
+
+                ArrayList<MNode> whenNodeList = caseNode.children("when")
+                int whenNodeListSize = whenNodeList.size()
+                if (whenNodeListSize == 0) throw new EntityException("No when element under case in alias ${fieldNode.attribute("name")} in view-entity ${getFullEntityName()}")
+                for (int i = 0; i < whenNodeListSize; i++) {
+                    MNode whenNode = (MNode) whenNodeList.get(i)
+                    colNameBuilder.append(" WHEN ").append(whenNode.attribute("expression")).append(" THEN ")
+                    MNode whenComplexAliasNode = whenNode.first("complex-alias")
+                    if (whenComplexAliasNode == null) throw new EntityException("No complex-alias element under case.when in alias ${fieldNode.attribute("name")} in view-entity ${getFullEntityName()}")
+                    buildComplexAliasName(whenComplexAliasNode, colNameBuilder)
+                }
+
+                MNode elseNode = caseNode.first("else")
+                if (elseNode != null) {
+                    colNameBuilder.append(" ELSE ")
+                    MNode elseComplexAliasNode = elseNode.first("complex-alias")
+                    if (elseComplexAliasNode == null) throw new EntityException("No complex-alias element under case.else in alias ${fieldNode.attribute("name")} in view-entity ${getFullEntityName()}")
+                    buildComplexAliasName(elseComplexAliasNode, colNameBuilder)
+                }
+
+                colNameBuilder.append(" END")
+            } else if (complexAliasNode != null) {
+                buildComplexAliasName(fieldNode, colNameBuilder)
+            } else {
+                // column name for view-entity (prefix with "${entity-alias}.")
+                colNameBuilder.append(fieldNode.attribute('entity-alias')).append('.')
+
+                String memberFieldName = fieldNode.attribute('field') ?: fieldNode.attribute('name')
+                colNameBuilder.append(getBasicFieldColName(internalEntityNode,
+                        (String) fieldNode.attribute('entity-alias'), memberFieldName))
+            }
+            if (hasFunction) colNameBuilder.append(')')
+
+            return colNameBuilder.toString()
+        } else {
+            return null
+        }
+    }
+
+    protected void buildComplexAliasName(MNode parentNode, StringBuilder colNameBuilder) {
+        String expression = parentNode.attribute('expression')
+        // NOTE: this is expanded in FieldInfo.getFullColumnName() if needed
+        if (expression != null && expression.length() > 0) colNameBuilder.append(expression)
+
+        ArrayList<MNode> childList = parentNode.children
+        int childListSize = childList.size()
+        if (childListSize == 0) return
+
+        String operator = parentNode.attribute("operator")
+        if (operator == null || operator.length() == 0) operator = "+"
+
+        if (childListSize > 1) colNameBuilder.append('(')
+        for (int i = 0; i < childListSize; i++) {
+            MNode childNode = (MNode) childList.get(i)
+            if (i > 0) colNameBuilder.append(' ').append(operator).append(' ')
+
+            if ("complex-alias".equals(childNode.name)) {
+                buildComplexAliasName(childNode, colNameBuilder)
+            } else if ("complex-alias-field".equals(childNode.name)) {
                 String entityAlias = childNode.attribute("entity-alias")
                 String basicColName = getBasicFieldColName(internalEntityNode, entityAlias, (String) childNode.attribute("field"))
                 String colName = entityAlias + "." + basicColName
@@ -792,7 +841,7 @@ public class EntityDefinition {
                 colNameBuilder.append(colName)
             }
         }
-        colNameBuilder.append(')')
+        if (childListSize > 1) colNameBuilder.append(')')
     }
 
     static protected String getFunctionPrefix(String function) {
@@ -890,7 +939,7 @@ public class EntityDefinition {
 
                     Set<String> userGroupIdSet = efi.getEcfi().getExecutionContext().getUser().getUserGroupIdSet()
                     for (EntityValue userField in userFieldList) {
-                        if (userGroupIdSet.contains(userField.get('userGroupId'))) userFieldNames.add((String) userField.get('fieldName'))
+                        if (userGroupIdSet.contains(userField.getNoCheckSimple('userGroupId'))) userFieldNames.add((String) userField.getNoCheckSimple('fieldName'))
                     }
                 } else {
                     hasUserFields = false
@@ -1408,8 +1457,8 @@ public class EntityDefinition {
                 boolean foundOne = false
                 for (MNode keyMapNode in memberEntityNode.children("key-map")) {
                     //logger.warn("TOREMOVE 4 getMePkFieldToAliasNameMap entityAlias=${entityAlias} for pkName=${pkName}, keyMapNode=${keyMapNode}")
-                    if (keyMapNode.attribute("related-field-name") == pkName ||
-                            (!keyMapNode.attribute("related-field-name") && keyMapNode.attribute("field-name") == pkName)) {
+                    String relatedField = keyMapNode.attribute("related") ?: keyMapNode.attribute("related-field-name") ?: keyMapNode.attribute("field-name")
+                    if (relatedField == pkName) {
                         String relatedPkName = keyMapNode.attribute("field-name")
                         MNode relatedMatchingAliasNode = entityNode.children("alias").find({
                             it.attribute("entity-alias") == memberEntityNode.attribute("join-from-alias") &&
@@ -1431,7 +1480,8 @@ public class EntityDefinition {
                     boolean foundOne = false
                     for (MNode keyMapNode in relatedMeNode.children("key-map")) {
                         if (keyMapNode.attribute("field-name") == pkName) {
-                            String relatedPkName = keyMapNode.attribute("related-field-name") ?: keyMapNode.attribute("field-name")
+                            String relatedPkName = keyMapNode.attribute("related") ?:
+                                    keyMapNode.attribute("related-field-name") ?: keyMapNode.attribute("field-name")
                             MNode relatedMatchingAliasNode = entityNode.children("alias").find({
                                 it.attribute("entity-alias") == relatedMeNode.attribute("entity-alias") &&
                                 (it.attribute("field") == relatedPkName || (!it.attribute("field") && it.attribute("name") == relatedPkName)) })
@@ -1583,17 +1633,12 @@ public class EntityDefinition {
         return EntityJavaUtil.convertFromString(value, fi, eci.getL10nFacade())
     }
 
-    String getFieldString(String name, Object value) {
-        if (value == null) return null
-        FieldInfo fi = getFieldInfo(name)
-        return getFieldInfoString(fi, value)
-    }
     String getFieldInfoString(FieldInfo fi, Object value) {
         if (value == null) return null
         return EntityJavaUtil.convertToString(value, fi, efi)
     }
 
-    String getFieldStringForFile(String name, Object value) {
+    String getFieldStringForFile(FieldInfo fieldInfo, Object value) {
         if (value == null) return null
 
         String outValue
@@ -1603,7 +1648,7 @@ public class EntityDefinition {
         } else if (value instanceof BigDecimal) {
             outValue = value.toPlainString()
         } else {
-            outValue = getFieldString(name, value)
+            outValue = getFieldInfoString(fieldInfo, value)
         }
 
         return outValue
@@ -1654,7 +1699,7 @@ public class EntityDefinition {
                             if (!isRel && keyMap.attribute("field-name") == fieldNode.attribute("name")) {
                                 isInViewLink = true
                                 break
-                            } else if (isRel && (keyMap.attribute("related-field-name") ?: keyMap.attribute("field-name")) == fieldNode.attribute("name")) {
+                            } else if (isRel && ((keyMap.attribute("related") ?: keyMap.attribute("related-field-name") ?: keyMap.attribute("field-name"))) == fieldNode.attribute("name")) {
                                 isInViewLink = true
                                 break
                             }
@@ -1683,12 +1728,12 @@ public class EntityDefinition {
     }
 
     EntityConditionImplBase makeViewWhereCondition() {
-        if (!this.isViewEntity() || entityConditionNode == null) return null
+        if (!this.isViewEntity() || entityConditionNode == null) return (EntityConditionImplBase) null
         // add the view-entity.entity-condition.econdition(s)
         return makeViewListCondition(entityConditionNode)
     }
     EntityConditionImplBase makeViewHavingCondition() {
-        if (!this.isViewEntity() || entityHavingEconditions == null) return null
+        if (!this.isViewEntity() || entityHavingEconditions == null) return (EntityConditionImplBase) null
         // add the view-entity.entity-condition.having-econditions
         return makeViewListCondition(entityHavingEconditions)
     }
@@ -1758,22 +1803,22 @@ public class EntityDefinition {
     }
 
     Cache<EntityCondition, EntityValueBase> internalCacheOne = null
-    Cache<EntityCondition, ArrayList<EntityCondition>> internalCacheOneRa = null
-    Cache<EntityCondition, ArrayList<EntityCache.ViewRaKey>> getCacheOneViewRa = null
+    Cache<EntityCondition, List<EntityCondition>> internalCacheOneRa = null
+    Cache<EntityCondition, List<EntityCache.ViewRaKey>> getCacheOneViewRa = null
     Cache<EntityCondition, EntityListImpl> internalCacheList = null
-    Cache<EntityCondition, ArrayList<EntityCondition>> internalCacheListRa = null
-    Cache<EntityCondition, ArrayList<EntityCache.ViewRaKey>> internalCacheListViewRa = null
+    Cache<EntityCondition, List<EntityCondition>> internalCacheListRa = null
+    Cache<EntityCondition, List<EntityCache.ViewRaKey>> internalCacheListViewRa = null
     Cache<EntityCondition, Long> internalCacheCount = null
 
     Cache<EntityCondition, EntityValueBase> getCacheOne(EntityCache ec) {
         if (internalCacheOne == null) internalCacheOne = ec.cfi.getCache(ec.oneKeyBase.concat(fullEntityName), efi.tenantId)
         return internalCacheOne
     }
-    Cache<EntityCondition, ArrayList<EntityCondition>> getCacheOneRa(EntityCache ec) {
+    Cache<EntityCondition, List<EntityCondition>> getCacheOneRa(EntityCache ec) {
         if (internalCacheOneRa == null) internalCacheOneRa = ec.cfi.getCache(ec.oneRaKeyBase.concat(fullEntityName), efi.tenantId)
         return internalCacheOneRa
     }
-    Cache<EntityCondition, ArrayList<EntityCache.ViewRaKey>> getCacheOneViewRa(EntityCache ec) {
+    Cache<EntityCondition, List<EntityCache.ViewRaKey>> getCacheOneViewRa(EntityCache ec) {
         if (getCacheOneViewRa == null) getCacheOneViewRa = ec.cfi.getCache(ec.oneViewRaKeyBase.concat(fullEntityName), efi.tenantId)
         return getCacheOneViewRa
     }
@@ -1782,11 +1827,11 @@ public class EntityDefinition {
         if (internalCacheList == null) internalCacheList = ec.cfi.getCache(ec.listKeyBase.concat(fullEntityName), efi.tenantId)
         return internalCacheList
     }
-    Cache<EntityCondition, ArrayList<EntityCondition>> getCacheListRa(EntityCache ec) {
+    Cache<EntityCondition, List<EntityCondition>> getCacheListRa(EntityCache ec) {
         if (internalCacheListRa == null) internalCacheListRa = ec.cfi.getCache(ec.listRaKeyBase.concat(fullEntityName), efi.tenantId)
         return internalCacheListRa
     }
-    Cache<EntityCondition, ArrayList<EntityCache.ViewRaKey>> getCacheListViewRa(EntityCache ec) {
+    Cache<EntityCondition, List<EntityCache.ViewRaKey>> getCacheListViewRa(EntityCache ec) {
         if (internalCacheListViewRa == null) internalCacheListViewRa = ec.cfi.getCache(ec.listViewRaKeyBase.concat(fullEntityName), efi.tenantId)
         return internalCacheListViewRa
     }

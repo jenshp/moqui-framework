@@ -34,7 +34,7 @@ import java.util.Locale;
 
 @CompileStatic
 public class FtlTemplateRenderer implements TemplateRenderer {
-    public static final Version FTL_VERSION = Configuration.VERSION_2_3_24;
+    public static final Version FTL_VERSION = Configuration.VERSION_2_3_25;
     protected static final Logger logger = LoggerFactory.getLogger(FtlTemplateRenderer.class);
     protected ExecutionContextFactoryImpl ecfi;
     private Configuration defaultFtlConfiguration;
@@ -170,13 +170,12 @@ public class FtlTemplateRenderer implements TemplateRenderer {
                 if (te.getCause() != null) {
                     BaseException.filterStackTrace(te.getCause());
                     logger.error("Error in FTL render", te.getCause());
-                    out.write("[Error: " + te.getCause().getMessage() + "]");
+                    out.write("[FTL Error: " + te.getCause().getMessage() + "]");
                 } else {
                     BaseException.filterStackTrace(te);
                     logger.error("Error in FTL render", te);
-                    out.write("[Template Error: " + te.getMessage() + "]");
+                    out.write("[FTL Error: " + te.getMessage() + "]");
                 }
-
             } catch (IOException e) {
                 throw new TemplateException("Failed to print error message. Cause: " + e, env);
             }

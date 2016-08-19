@@ -39,7 +39,6 @@ class ExecutionContextImpl implements ExecutionContext {
 
     protected final ContextStack context = new ContextStack()
     protected final ContextBinding contextBinding = new ContextBinding(context)
-    protected final Map<String, Object> toolInstanceMap = new HashMap<>()
     protected String activeTenantId = "DEFAULT"
     protected LinkedList<String> tenantIdStack = (LinkedList<String>) null
 
@@ -95,13 +94,8 @@ class ExecutionContextImpl implements ExecutionContext {
     ContextBinding getContextBinding() { return contextBinding }
 
     @Override
-    <V> V getTool(String toolName, Class<V> instanceClass) {
-        V toolInstance = (V) toolInstanceMap.get(toolName)
-        if (toolInstance == null) {
-            toolInstance = ecfi.getTool(toolName, instanceClass)
-            toolInstanceMap.put(toolName, toolInstance)
-        }
-        return toolInstance
+    <V> V getTool(String toolName, Class<V> instanceClass, Object... parameters) {
+        return ecfi.getTool(toolName, instanceClass, parameters)
     }
 
     @Override
@@ -155,20 +149,20 @@ class ExecutionContextImpl implements ExecutionContext {
     ScreenFacade getScreen() { ecfi.getScreenFacade() }
 
     @Override
-    NotificationMessage makeNotificationMessage() { return new NotificationMessageImpl(this) }
+    NotificationMessage makeNotificationMessage() { return new NotificationMessageImpl(ecfi, tenantId) }
     @Override
-    List<NotificationMessage> getNotificationMessages(String userId, String topic) {
-        if (!userId && !topic) return []
+    List<NotificationMessage> getNotificationMessages(String topic) {
+        String userId = userFacade.userId
+        if (!userId) return []
 
         List<NotificationMessage> nmList = []
         boolean alreadyDisabled = getArtifactExecution().disableAuthz()
         try {
-            Map<String, Object> parameters = [receivedDate:null] as Map<String, Object>
-            if (userId) parameters.userId = userId
+            Map<String, Object> parameters = [userId:userId, receivedDate:null] as Map<String, Object>
             if (topic) parameters.topic = topic
             EntityList nmbuList = entity.find("moqui.security.user.NotificationMessageByUser").condition(parameters).list()
             for (EntityValue nmbu in nmbuList) {
-                NotificationMessageImpl nmi = new NotificationMessageImpl(this)
+                NotificationMessageImpl nmi = new NotificationMessageImpl(ecfi, tenantId)
                 nmi.populateFromValue(nmbu)
                 nmList.add(nmi)
             }
@@ -176,10 +170,6 @@ class ExecutionContextImpl implements ExecutionContext {
             if (!alreadyDisabled) getArtifactExecution().enableAuthz()
         }
         return nmList
-    }
-    @Override
-    void registerNotificationMessageListener(NotificationMessageListener nml) {
-        ecfi.registerNotificationMessageListener(nml)
     }
 
     @Override

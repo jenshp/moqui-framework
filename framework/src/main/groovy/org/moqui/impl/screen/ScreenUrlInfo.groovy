@@ -14,7 +14,6 @@
 package org.moqui.impl.screen
 
 import groovy.transform.CompileStatic
-import org.apache.commons.codec.net.URLCodec
 import org.moqui.BaseException
 import org.moqui.context.ArtifactExecutionInfo
 import org.moqui.context.ExecutionContext
@@ -42,7 +41,6 @@ import javax.cache.Cache
 @CompileStatic
 class ScreenUrlInfo {
     protected final static Logger logger = LoggerFactory.getLogger(ScreenUrlInfo.class)
-    protected final static URLCodec urlCodec = new URLCodec()
 
     // ExecutionContext ec
     ExecutionContextFactoryImpl ecfi
@@ -213,7 +211,7 @@ class ScreenUrlInfo {
 
         // if a user is permitted to view a certain location once in a render/ec they can safely be always allowed to, so cache it
         // add the username to the key just in case user changes during an EC instance
-        String permittedCacheKey = null
+        String permittedCacheKey = (String) null
         if (fullPathNameList != null) {
             String keyUserId = userId != null ? userId : '_anonymous'
             permittedCacheKey = keyUserId.concat(fullPathNameList.toString())
@@ -239,14 +237,14 @@ class ScreenUrlInfo {
             MNode screenNode = screenDef.getScreenNode()
 
             // if screen is limited to certain tenants, and current tenant is not in the Set, it is not permitted
-            if (screenDef.getTenantsAllowed() && !screenDef.getTenantsAllowed().contains(ec.getTenantId())) {
+            if (screenDef.getTenantsAllowed().size() > 0 && !screenDef.getTenantsAllowed().contains(ec.getTenantId())) {
                 if (permittedCacheKey != null) aefi.screenPermittedCache.put(permittedCacheKey, false)
                 return false
             }
 
             String requireAuthentication = screenNode.attribute('require-authentication')
             if (!aefi.isPermitted(aeii, lastAeii,
-                    isLast ? (!requireAuthentication || "true".equals(requireAuthentication)) : false, false)) {
+                    isLast ? (!requireAuthentication || "true".equals(requireAuthentication)) : false, false, false)) {
                 // logger.warn("TOREMOVE user ${username} is NOT allowed to view screen at path ${this.fullPathNameList} because of screen at ${screenDef.location}")
                 if (permittedCacheKey != null) aefi.screenPermittedCache.put(permittedCacheKey, false)
                 return false
@@ -284,7 +282,7 @@ class ScreenUrlInfo {
             int listSize = fullPathNameList.size()
             for (int i = 0; i < listSize; i++) {
                 String pathName = fullPathNameList.get(i)
-                urlBuilder.append('/').append(urlCodec.encode(pathName))
+                urlBuilder.append('/').append(URLEncoder.encode(pathName, "UTF-8"))
             }
         }
         return urlBuilder.toString()
@@ -485,7 +483,7 @@ class ScreenUrlInfo {
                     .condition("screenLocation", lastSd.location).useCache(true).disableAuthz().list()
             for (int i = 0; i < subscreensDefaultList.size(); i++) {
                 EntityValue subscreensDefault = subscreensDefaultList.get(i)
-                String condStr = (String) subscreensDefault.condition
+                String condStr = (String) subscreensDefault.conditionExpression
                 if (condStr && !ecfi.getResource().condition(condStr, "SubscreensDefault_condition")) continue
                 subscreenName = subscreensDefault.subscreenName
             }
@@ -618,7 +616,7 @@ class ScreenUrlInfo {
                 List<String> nameValuePairs = pathParmString.replaceAll("&amp;", "&").split("&") as List
                 for (String nameValuePair in nameValuePairs) {
                     String[] nameValue = nameValuePair.substring(0).split("=")
-                    if (nameValue.length == 2) inlineParameters.put(nameValue[0], urlCodec.decode(nameValue[1]))
+                    if (nameValue.length == 2) inlineParameters.put(nameValue[0], URLDecoder.decode(nameValue[1], "UTF-8"))
                 }
             }
             screenPath = screenPath.substring(0, indexOfQuestionMark)
@@ -658,6 +656,8 @@ class ScreenUrlInfo {
         }
     }
 
+    static final char plusChar = '+' as char
+    static final char spaceChar = ' ' as char
     static ArrayList<String> cleanupPathNameList(ArrayList<String> inputPathNameList, Map inlineParameters) {
         // filter the list: remove empty, remove ".", remove ".." and previous
         int inputPathNameListSize = inputPathNameList.size()
@@ -676,11 +676,16 @@ class ScreenUrlInfo {
             if (pathName.startsWith("~")) {
                 if (inlineParameters != null) {
                     String[] nameValue = pathName.substring(1).split("=")
-                    if (nameValue.length == 2) inlineParameters.put(nameValue[0], urlCodec.decode(nameValue[1]))
+                    if (nameValue.length == 2) inlineParameters.put(nameValue[0], URLDecoder.decode(nameValue[1], "UTF-8"))
                 }
                 continue
             }
-            cleanList.add(urlCodec.decode(pathName))
+
+            // the original approach, not needed as already decoded: cleanList.add(URLDecoder.decode(pathName, "UTF-8"))
+
+            // while already decoded plus for space is not generally supported in URLs aside from parameters, but we
+            //     want to support that in screen path URLs
+            cleanList.add(pathName.replace(plusChar, spaceChar))
         }
         return cleanList
     }
@@ -844,7 +849,7 @@ class ScreenUrlInfo {
                 if (!pme.value) continue
                 if (pme.key == "moquiSessionToken") continue
                 if (ps.length() > 0) ps.append("&")
-                ps.append(pme.key).append("=").append(urlCodec.encode(pme.value))
+                ps.append(URLEncoder.encode(pme.key, "UTF-8")).append("=").append(URLEncoder.encode(pme.value, "UTF-8"))
             }
             return ps.toString()
         }
@@ -854,7 +859,7 @@ class ScreenUrlInfo {
             for (Map.Entry<String, String> pme in pm.entrySet()) {
                 if (!pme.getValue()) continue
                 ps.append("/~")
-                ps.append(pme.getKey()).append("=").append(urlCodec.encode(pme.getValue()))
+                ps.append(URLEncoder.encode(pme.getKey(), "UTF-8")).append("=").append(URLEncoder.encode(pme.getValue(), "UTF-8"))
             }
             return ps.toString()
         }

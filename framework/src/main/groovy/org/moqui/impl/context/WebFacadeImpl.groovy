@@ -22,7 +22,6 @@ import org.apache.commons.fileupload.FileItem
 import org.apache.commons.fileupload.FileItemFactory
 import org.apache.commons.fileupload.disk.DiskFileItemFactory
 import org.apache.commons.fileupload.servlet.ServletFileUpload
-
 import org.moqui.context.*
 import org.moqui.entity.EntityNotFoundException
 import org.moqui.entity.EntityValueNotFoundException
@@ -142,10 +141,10 @@ class WebFacadeImpl implements WebFacade {
 
             for (FileItem item in items) {
                 if (item.isFormField()) {
-                    multiPartParameters.put(item.getFieldName(), item.getString("UTF-8"))
+                    addValueToMultipartParameterMap(item.getFieldName(), item.getString("UTF-8"))
                 } else {
                     // put the FileItem itself in the Map to be used by the application code
-                    multiPartParameters.put(item.getFieldName(), item)
+                    addValueToMultipartParameterMap(item.getFieldName(), item)
                     fileUploadList.add(item)
 
                     /* Stuff to do with the FileItem:
@@ -178,9 +177,26 @@ class WebFacadeImpl implements WebFacade {
             SecureRandom sr = new SecureRandom()
             byte[] randomBytes = new byte[20]
             sr.nextBytes(randomBytes)
+            // TODO: when we move to Java 8 use java.util.Base64
             sessionToken = Base64.encodeBase64URLSafeString(randomBytes)
             session.setAttribute("moqui.session.token", sessionToken)
             request.setAttribute("moqui.session.token.created", "true")
+        }
+    }
+
+    /** Apache Commons FileUpload does not support string array so when using multiple select and there's a duplicate
+     * fieldName convert value to an array list when fieldName is already in multipart parameters. */
+    private void addValueToMultipartParameterMap(String key, Object value) {
+        Object previousValue = multiPartParameters.put(key, value)
+        if (previousValue != null) {
+            List<Object> valueList = new ArrayList<>()
+            valueList.add(value)
+            multiPartParameters.put(key, valueList)
+            if(previousValue instanceof Collection) {
+                valueList.addAll((Collection) previousValue)
+            } else {
+                valueList.add(previousValue)
+            }
         }
     }
 
@@ -268,7 +284,7 @@ class WebFacadeImpl implements WebFacade {
 
                     // injection issue with name field: userId=%3Cscript%3Ealert(%27Test%20Crack!%27)%3C/script%3E
                     String parmValue = entry.value
-                    if (parmValue) parmValue = StupidWebUtilities.defaultWebEncoder.encodeForHTML(parmValue)
+                    if (parmValue) parmValue = URLEncoder.encode(parmValue, "UTF-8")
                     paramBuilder.append(parmValue)
 
                     pCount++
@@ -352,14 +368,17 @@ class WebFacadeImpl implements WebFacade {
 
         ContextStack cs = new ContextStack(false)
         if (savedParameters != null) cs.push(savedParameters)
-        if (multiPartParameters != null) cs.push(new StupidWebUtilities.CanonicalizeMap(multiPartParameters))
+        if (multiPartParameters != null) cs.push(multiPartParameters)
         if (jsonParameters != null) cs.push(jsonParameters)
         if (declaredPathParameters != null) cs.push(new StupidWebUtilities.CanonicalizeMap(declaredPathParameters))
-        Map reqParmMap = request.getParameterMap()
-        if (reqParmMap != null && reqParmMap.size() > 0) cs.push(new StupidWebUtilities.CanonicalizeMap(reqParmMap))
-        Map<String, Object> pathInfoParameterMap = StupidWebUtilities.getPathInfoParameterMap(request.getPathInfo())
-        if (pathInfoParameterMap != null && pathInfoParameterMap.size() > 0)
-            cs.push(new StupidWebUtilities.CanonicalizeMap(pathInfoParameterMap))
+
+        // no longer uses StupidWebUtilities.CanonicalizeMap, search Map for String[] of size 1 and change to String
+        Map<String, Object> reqParmMap = StupidWebUtilities.simplifyRequestParameters(request)
+        if (reqParmMap.size() > 0) cs.push(reqParmMap)
+
+        // NOTE: We decode path parameter ourselves, so use getRequestURI instead of getPathInfo
+        Map<String, Object> pathInfoParameterMap = StupidWebUtilities.getPathInfoParameterMap(request.getRequestURI())
+        if (pathInfoParameterMap != null && pathInfoParameterMap.size() > 0) cs.push(pathInfoParameterMap)
         // NOTE: the CanonicalizeMap cleans up character encodings, and unwraps lists of values with a single entry
 
         // do one last push so writes don't modify whatever was at the top of the stack
@@ -373,10 +392,11 @@ class WebFacadeImpl implements WebFacade {
         if (savedParameters) cs.push(savedParameters)
         if (multiPartParameters) cs.push(multiPartParameters)
         if (jsonParameters) cs.push(jsonParameters)
-        if (!request.getQueryString()) cs.push(request.getParameterMap() as Map<String, Object>)
-
-        // NOTE: the CanonicalizeMap cleans up character encodings, and unwraps lists of values with a single entry
-        return new StupidWebUtilities.CanonicalizeMap(cs)
+        if (!request.getQueryString()) {
+            Map<String, Object> reqParmMap = StupidWebUtilities.simplifyRequestParameters(request)
+            if (reqParmMap.size() > 0) cs.push(reqParmMap)
+        }
+        return cs
     }
     @Override
     String getHostName(boolean withPort) {
@@ -619,16 +639,32 @@ class WebFacadeImpl implements WebFacade {
         try {
             response.writer.write(jsonStr)
             response.writer.flush()
-            if (logger.infoEnabled) {
+            if (logger.isTraceEnabled()) {
                 Long startTime = (Long) requestAttributes.get("moquiRequestStartTime")
                 String timeMsg = ""
                 if (startTime) timeMsg = "in ${(System.currentTimeMillis()-startTime)}ms"
-                logger.info("Sent JSON response ${length} bytes ${charset} encoding ${timeMsg} for ${request.getMethod()} to ${request.getPathInfo()}")
+                logger.trace("Sent JSON response ${length} bytes ${charset} encoding ${timeMsg} for ${request.getMethod()} to ${request.getPathInfo()}")
             }
         } catch (IOException e) {
             logger.error("Error sending JSON string response", e)
         }
     }
+
+    void sendJsonError(int statusCode, String errorMessages) {
+        JsonBuilder jb = new JsonBuilder()
+        // NOTE: uses same field name as sendJsonResponseInternal
+        jb.call([errorCode:statusCode, errors:errorMessages])
+        String jsonStr = jb.toString()
+        response.setContentType("application/json")
+        // NOTE: String.length not correct for byte length
+        String charset = response.getCharacterEncoding() ?: "UTF-8"
+        int length = jsonStr.getBytes(charset).length
+        response.setContentLength(length)
+        response.setStatus(statusCode)
+        response.writer.write(jsonStr)
+        response.writer.flush()
+    }
+
 
     @Override
     void sendTextResponse(String text) {
@@ -654,7 +690,7 @@ class WebFacadeImpl implements WebFacade {
         response.setContentType(contentType)
         // NOTE: String.length not correct for byte length
         String charset = response.getCharacterEncoding() ?: "UTF-8"
-        int length = responseText ? responseText.getBytes(charset).length : 0I
+        int length = responseText != null ? responseText.getBytes(charset).length : 0I
         response.setContentLength(length)
 
         if (!filename) {
@@ -727,7 +763,7 @@ class WebFacadeImpl implements WebFacade {
 
         // check for parsing error, send a 400 response
         if (parmStack._requestBodyJsonParseError) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, (String) parmStack._requestBodyJsonParseError)
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, (String) parmStack._requestBodyJsonParseError)
             return
         }
 
@@ -736,7 +772,7 @@ class WebFacadeImpl implements WebFacade {
             // if there was a login error there will be a MessageFacade error message
             String errorMessage = eci.message.errorsString
             if (!errorMessage) errorMessage = "Authentication required for entity REST operations"
-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
+            sendJsonError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
             return
         }
 
@@ -752,7 +788,7 @@ class WebFacadeImpl implements WebFacade {
                     if (!(bodyListObj instanceof Map)) {
                         String errMsg = "If request body JSON is a list/array it must contain only object/map values, found non-map entry of type ${bodyListObj.getClass().getName()} with value: ${bodyListObj}"
                         logger.warn(errMsg)
-                        response.sendError(HttpServletResponse.SC_BAD_REQUEST, errMsg)
+                        sendJsonError(HttpServletResponse.SC_BAD_REQUEST, errMsg)
                         return
                     }
                     // logger.warn("========== REST ${request.getMethod()} ${request.getPathInfo()} ${extraPathNameList}; body list object: ${bodyListObj}")
@@ -782,20 +818,20 @@ class WebFacadeImpl implements WebFacade {
         } catch (ArtifactAuthorizationException e) {
             // SC_UNAUTHORIZED 401 used when authc/login fails, use SC_FORBIDDEN 403 for authz failures
             logger.warn("REST Access Forbidden (no authz): " + e.message)
-            response.sendError(HttpServletResponse.SC_FORBIDDEN, e.message)
+            sendJsonError(HttpServletResponse.SC_FORBIDDEN, e.message)
         } catch (ArtifactTarpitException e) {
             logger.warn("REST Too Many Requests (tarpit): " + e.message)
             if (e.getRetryAfterSeconds()) response.addIntHeader("Retry-After", e.getRetryAfterSeconds())
             // NOTE: there is no constant on HttpServletResponse for 429; see RFC 6585 for details
-            response.sendError(429, e.message)
+            sendJsonError(429, e.message)
         } catch (EntityNotFoundException e) {
             logger.warn((String) "REST Entity Not Found: " + e.getMessage(), e)
             // send bad request (400), reserve 404 Not Found for records that don't exist
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.message)
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, e.message)
         } catch (EntityValueNotFoundException e) {
             logger.warn("REST Entity Value Not Found: " + e.getMessage())
             // record doesn't exist, send 404 Not Found
-            response.sendError(HttpServletResponse.SC_NOT_FOUND, e.message)
+            sendJsonError(HttpServletResponse.SC_NOT_FOUND, e.message)
         } catch (Throwable t) {
             String errorMessage = t.toString()
             if (eci.message.hasError()) {
@@ -804,7 +840,7 @@ class WebFacadeImpl implements WebFacade {
                 errorMessage = errorMessage + ' ' + errorsString
             }
             logger.warn((String) "General error in entity REST: " + t.toString(), t)
-            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorMessage)
+            sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorMessage)
         }
     }
 
@@ -815,7 +851,7 @@ class WebFacadeImpl implements WebFacade {
             // if there was a login error there will be a MessageFacade error message
             String errorMessage = eci.message.errorsString
             if (!errorMessage) errorMessage = "Authentication required for entity REST schema"
-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
+            sendJsonError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
             return
         }
 
@@ -876,7 +912,7 @@ class WebFacadeImpl implements WebFacade {
             try {
                 EntityDefinition ed = efi.getEntityDefinition(entityName)
                 if (ed == null) {
-                    response.sendError(HttpServletResponse.SC_BAD_REQUEST, "No entity found with name or alias [${entityName}]")
+                    sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No entity found with name or alias [${entityName}]")
                     return
                 }
 
@@ -890,7 +926,8 @@ class WebFacadeImpl implements WebFacade {
 
                 sendTextResponse(jsonStr, "application/schema+json", "${entityName}.schema.json")
             } catch (EntityNotFoundException e) {
-                response.sendError(HttpServletResponse.SC_BAD_REQUEST, "No entity found with name or alias [${entityName}]")
+                if (logger.isTraceEnabled()) logger.trace("In entity REST schema entity not found: " + e.toString())
+                sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No entity found with name or alias [${entityName}]")
             }
         }
     }
@@ -901,7 +938,7 @@ class WebFacadeImpl implements WebFacade {
             // if there was a login error there will be a MessageFacade error message
             String errorMessage = eci.message.errorsString
             if (!errorMessage) errorMessage = "Authentication required for entity REST schema"
-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
+            sendJsonError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
             return
         }
 
@@ -972,7 +1009,7 @@ class WebFacadeImpl implements WebFacade {
 
     void handleEntityRestSwagger(List<String> extraPathNameList, String basePath, boolean getMaster) {
         if (extraPathNameList.size() == 0) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "No entity name specified in path (for all entities use 'all')")
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No entity name specified in path (for all entities use 'all')")
             return
         }
 
@@ -1055,7 +1092,7 @@ class WebFacadeImpl implements WebFacade {
 
             sendTextResponse(yamlString, "application/yaml", "${filename}.swagger.yaml")
         } else {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Output type ${outputType} not supported")
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "Output type ${outputType} not supported")
         }
     }
 
@@ -1067,12 +1104,12 @@ class WebFacadeImpl implements WebFacade {
         if (eci.message.hasError()) {
             String errorsString = eci.message.errorsString
             logger.warn((String) "General error in Service REST API: " + errorsString)
-            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
+            sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
         }
 
         // check for parsing error, send a 400 response
         if (parmStack._requestBodyJsonParseError) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, (String) parmStack._requestBodyJsonParseError)
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, (String) parmStack._requestBodyJsonParseError)
             return
         }
 
@@ -1087,7 +1124,7 @@ class WebFacadeImpl implements WebFacade {
                     if (!(bodyListObj instanceof Map)) {
                         String errMsg = "If request body JSON is a list/array it must contain only object/map values, found non-map entry of type ${bodyListObj.getClass().getName()} with value: ${bodyListObj}"
                         logger.warn(errMsg)
-                        response.sendError(HttpServletResponse.SC_BAD_REQUEST, errMsg)
+                        sendJsonError(HttpServletResponse.SC_BAD_REQUEST, errMsg)
                         return
                     }
                     // logger.warn("========== REST ${request.getMethod()} ${request.getPathInfo()} ${extraPathNameList}; body list object: ${bodyListObj}")
@@ -1107,7 +1144,7 @@ class WebFacadeImpl implements WebFacade {
                     // if error return that
                     String errorsString = eci.message.errorsString
                     logger.warn((String) "General error in Service REST API: " + errorsString)
-                    response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
+                    sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
                 } else {
                     // otherwise send response
                     sendJsonResponse(responseList)
@@ -1123,7 +1160,7 @@ class WebFacadeImpl implements WebFacade {
                     // if error return that
                     String errorsString = eci.message.errorsString
                     logger.warn((String) "General error in Service REST API: " + errorsString)
-                    response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
+                    sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
                 } else {
                     // NOTE: This will always respond with 200 OK, consider using 201 Created (for successful POST, create PUT)
                     //     and 204 No Content (for DELETE and other when no content is returned)
@@ -1132,27 +1169,27 @@ class WebFacadeImpl implements WebFacade {
             }
         } catch (AuthenticationRequiredException e) {
             logger.warn("REST Unauthorized (no authc): " + e.message)
-            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, e.message)
+            sendJsonError(HttpServletResponse.SC_UNAUTHORIZED, e.message)
         } catch (ArtifactAuthorizationException e) {
             // SC_UNAUTHORIZED 401 used when authc/login fails, use SC_FORBIDDEN 403 for authz failures
             logger.warn("REST Access Forbidden (no authz): " + e.message)
-            response.sendError(HttpServletResponse.SC_FORBIDDEN, e.message)
+            sendJsonError(HttpServletResponse.SC_FORBIDDEN, e.message)
         } catch (ArtifactTarpitException e) {
             logger.warn("REST Too Many Requests (tarpit): " + e.message)
             if (e.getRetryAfterSeconds()) response.addIntHeader("Retry-After", e.getRetryAfterSeconds())
             // NOTE: there is no constant on HttpServletResponse for 429; see RFC 6585 for details
-            response.sendError(429, e.message)
+            sendJsonError(429, e.message)
         } catch (RestApi.ResourceNotFoundException e) {
-            logger.warn((String) "REST Resource Not Found: " + e.getMessage(), e)
+            logger.warn((String) "REST Resource Not Found: " + e.getMessage())
             // send bad request (400), reserve 404 Not Found for records that don't exist
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.message)
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, e.message)
         } catch (RestApi.MethodNotSupportedException e) {
-            logger.warn((String) "REST Method Not Supported: " + e.getMessage(), e)
-            response.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED, e.message)
+            logger.warn((String) "REST Method Not Supported: " + e.getMessage())
+            sendJsonError(HttpServletResponse.SC_METHOD_NOT_ALLOWED, e.message)
         } catch (EntityValueNotFoundException e) {
             logger.warn("REST Entity Value Not Found: " + e.getMessage())
             // record doesn't exist, send 404 Not Found
-            response.sendError(HttpServletResponse.SC_NOT_FOUND, e.message)
+            sendJsonError(HttpServletResponse.SC_NOT_FOUND, e.message)
         } catch (Throwable t) {
             String errorMessage = t.toString()
             if (eci.message.hasError()) {
@@ -1161,13 +1198,13 @@ class WebFacadeImpl implements WebFacade {
                 errorMessage = errorMessage + ' ' + errorsString
             }
             logger.warn((String) "General error in Service REST API: " + t.toString(), t)
-            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorMessage)
+            sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorMessage)
         }
     }
 
     void handleServiceRestSwagger(List<String> extraPathNameList, String basePath) {
         if (extraPathNameList.size() == 0) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "No root resource name specified in path")
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No root resource name specified in path")
             return
         }
 
@@ -1205,13 +1242,13 @@ class WebFacadeImpl implements WebFacade {
 
             sendTextResponse(yamlString, "application/yaml", "${filenameBase}swagger.yaml")
         } else {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Output type ${outputType} not supported")
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "Output type ${outputType} not supported")
         }
     }
 
     void handleServiceRestRaml(List<String> extraPathNameList, String linkPrefix) {
         if (extraPathNameList.size() == 0) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "No root resource name specified in path")
+            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No root resource name specified in path")
             return
         }
         String rootResourceName = extraPathNameList.get(0)
@@ -1278,9 +1315,9 @@ class WebFacadeImpl implements WebFacade {
         session.setAttribute("moqui.error.parameters", parms)
     }
 
-    static DiskFileItemFactory makeDiskFileItemFactory(ServletContext context) {
+    DiskFileItemFactory makeDiskFileItemFactory(ServletContext context) {
         // NOTE: consider keeping this factory somewhere to be more efficient, if it even makes a difference...
-        File repository = new File(System.getProperty("moqui.runtime") + "/tmp")
+        File repository = new File(eci.ecfi.runtimePath + "/tmp")
         if (!repository.exists()) repository.mkdir()
 
         DiskFileItemFactory factory = new DiskFileItemFactory(DiskFileItemFactory.DEFAULT_SIZE_THRESHOLD, repository)

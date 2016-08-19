@@ -27,6 +27,7 @@ import org.moqui.impl.StupidJavaUtilities
 import org.moqui.impl.StupidUtilities
 import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.ArtifactExecutionInfoImpl
+import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
 import org.moqui.impl.context.UserFacadeImpl
 import org.moqui.impl.context.WebFacadeImpl
@@ -46,20 +47,22 @@ class ScreenDefinition {
     protected final String screenName
     protected boolean standalone = false
     Long sourceLastModified = null
+    final long screenLoadedTime
 
-    protected Map<String, ParameterItem> parameterByName = new HashMap()
-    protected Map<String, TransitionItem> transitionByName = new HashMap()
-    protected Map<String, SubscreensItem> subscreensByName = new HashMap()
+    protected Map<String, ParameterItem> parameterByName = new HashMap<>()
+    protected Map<String, TransitionItem> transitionByName = new HashMap<>()
+    protected Map<String, SubscreensItem> subscreensByName = new HashMap<>()
     protected List<SubscreensItem> subscreensItemsSorted = null
-    protected Set<String> tenantsAllowed = null
+    protected Set<String> tenantsAllowed = new HashSet<>()
 
     protected XmlAction alwaysActions = null
     protected XmlAction preActions = null
 
     protected ScreenSection rootSection = null
-    protected Map<String, ScreenSection> sectionByName = new HashMap()
-    protected Map<String, ScreenForm> formByName = new HashMap()
-    protected Map<String, ScreenTree> treeByName = new HashMap()
+    protected Map<String, ScreenSection> sectionByName = new HashMap<>()
+    protected Map<String, ScreenForm> formByName = new HashMap<>()
+    protected Map<String, ScreenTree> treeByName = new HashMap<>()
+    protected final Set<String> dependsOnScreenLocations = new HashSet<>()
 
     protected Map<String, ResourceReference> subContentRefByPath = new HashMap()
     protected Map<String, String> macroTemplateByRenderMode = null
@@ -71,7 +74,10 @@ class ScreenDefinition {
         webSettingsNode = screenNode.first("web-settings")
         this.location = location
 
+        ExecutionContextFactoryImpl ecfi = sfi.ecfi
+
         long startTime = System.currentTimeMillis()
+        screenLoadedTime = startTime
 
         String filename = location.contains("/") ? location.substring(location.lastIndexOf("/")+1) : location
         screenName = filename.contains(".") ? filename.substring(0, filename.indexOf(".")) : filename
@@ -80,10 +86,10 @@ class ScreenDefinition {
 
         // parameter
         for (MNode parameterNode in screenNode.children("parameter"))
-            parameterByName.put(parameterNode.attribute("name"), new ParameterItem(parameterNode, location))
+            parameterByName.put(parameterNode.attribute("name"), new ParameterItem(parameterNode, location, ecfi))
         // prep always-actions
         if (screenNode.hasChild("always-actions"))
-            alwaysActions = new XmlAction(sfi.ecfi, screenNode.first("always-actions"), location + ".always_actions")
+            alwaysActions = new XmlAction(ecfi, screenNode.first("always-actions"), location + ".always_actions")
         // transition
         for (MNode transitionNode in screenNode.children("transition")) {
             TransitionItem ti = new TransitionItem(transitionNode, this)
@@ -91,7 +97,7 @@ class ScreenDefinition {
         }
         // transition-include
         for (MNode transitionInclNode in screenNode.children("transition-include")) {
-            ScreenDefinition includeScreen = sfi.getEcfi().getScreenFacade().getScreenDefinition(transitionInclNode.attribute("location"))
+            ScreenDefinition includeScreen = ecfi.getScreenFacade().getScreenDefinition(transitionInclNode.attribute("location"))
             MNode transitionNode = includeScreen?.getTransitionItem(transitionInclNode.attribute("name"), transitionInclNode.attribute("method"))?.transitionNode
             if (transitionNode == null) throw new IllegalArgumentException("For transition-include could not find transition [${transitionInclNode.attribute("name")}] with method [${transitionInclNode.attribute("method")}] in screen at [${transitionInclNode.attribute("location")}]")
             TransitionItem ti = new TransitionItem(transitionNode, this)
@@ -106,9 +112,8 @@ class ScreenDefinition {
         populateSubscreens()
 
         // tenants-allowed
-        if (screenNode.attribute("tenants-allowed")) {
-            tenantsAllowed = new HashSet(Arrays.asList((screenNode.attribute("tenants-allowed")).split(",")))
-        }
+        if (screenNode.attribute("tenants-allowed")) tenantsAllowed.addAll(Arrays.asList((screenNode.attribute("tenants-allowed")).split(",")))
+
         // macro-template - go through entire list and set all found, basically we want the last one if there are more than one
         List<MNode> macroTemplateList = screenNode.children("macro-template")
         if (macroTemplateList.size() > 0) {
@@ -118,32 +123,36 @@ class ScreenDefinition {
 
         // prep pre-actions
         if (screenNode.hasChild("pre-actions"))
-            preActions = new XmlAction(sfi.ecfi, screenNode.first("pre-actions"), location + ".pre_actions")
+            preActions = new XmlAction(ecfi, screenNode.first("pre-actions"), location + ".pre_actions")
 
         // get the root section
-        rootSection = new ScreenSection(sfi.ecfi, screenNode, location + ".screen")
+        rootSection = new ScreenSection(ecfi, screenNode, location + ".screen")
 
         if (rootSection && rootSection.widgets) {
             Map<String, ArrayList<MNode>> descMap = rootSection.widgets.widgetsNode.descendants(
                     new HashSet<String>(['section', 'section-iterate', 'section-include', 'form-single', 'form-list', 'tree']))
             // get all of the other sections by name
             for (MNode sectionNode in descMap.get('section'))
-                sectionByName.put(sectionNode.attribute("name"), new ScreenSection(sfi.ecfi, sectionNode, "${location}.section\$${sectionNode.attribute("name")}"))
+                sectionByName.put(sectionNode.attribute("name"), new ScreenSection(ecfi, sectionNode, "${location}.section\$${sectionNode.attribute("name")}"))
             for (MNode sectionNode in descMap.get('section-iterate'))
-                sectionByName.put(sectionNode.attribute("name"), new ScreenSection(sfi.ecfi, sectionNode, "${location}.section_iterate\$${sectionNode.attribute("name")}"))
-            for (MNode sectionNode in descMap.get('section-include'))
-                pullSectionInclude(sectionNode)
+                sectionByName.put(sectionNode.attribute("name"), new ScreenSection(ecfi, sectionNode, "${location}.section_iterate\$${sectionNode.attribute("name")}"))
+            for (MNode sectionNode in descMap.get('section-include')) pullSectionInclude(sectionNode)
 
             // get all forms by name
-            for (MNode formNode in descMap.get('form-single'))
-                formByName.put(formNode.attribute("name"), new ScreenForm(sfi.ecfi, this, formNode, "${location}.form_single\$${formNode.attribute("name")}"))
-            for (MNode formNode in descMap.get('form-list'))
-                formByName.put(formNode.attribute("name"), new ScreenForm(sfi.ecfi, this, formNode, "${location}.form_list\$${formNode.attribute("name")}"))
+            for (MNode formNode in descMap.get('form-single')) {
+                ScreenForm newForm = new ScreenForm(ecfi, this, formNode, "${location}.form_single\$${formNode.attribute("name")}")
+                if (newForm.extendsScreenLocation != null) dependsOnScreenLocations.add(newForm.extendsScreenLocation)
+                formByName.put(formNode.attribute("name"), newForm)
+            }
+            for (MNode formNode in descMap.get('form-list')) {
+                ScreenForm newForm = new ScreenForm(ecfi, this, formNode, "${location}.form_list\$${formNode.attribute("name")}")
+                if (newForm.extendsScreenLocation != null) dependsOnScreenLocations.add(newForm.extendsScreenLocation)
+                formByName.put(formNode.attribute("name"), newForm)
+            }
 
             // get all trees by name
-            for (MNode treeNode in descMap.get('tree')) {
-                treeByName.put(treeNode.attribute("name"), new ScreenTree(sfi.ecfi, this, treeNode, "${location}.tree\$${treeNode.attribute("name")}"))
-            }
+            for (MNode treeNode in descMap.get('tree'))
+                treeByName.put(treeNode.attribute("name"), new ScreenTree(ecfi, this, treeNode, "${location}.tree\$${treeNode.attribute("name")}"))
         }
 
         if (logger.isTraceEnabled()) logger.trace("Loaded screen at [${location}] in [${(System.currentTimeMillis()-startTime)/1000}] seconds")
@@ -161,6 +170,7 @@ class ScreenDefinition {
         ScreenSection includeSection = includeScreen?.getSection(sectionName)
         if (includeSection == null) throw new IllegalArgumentException("Could not find section [${sectionNode.attribute("name")} to include at location [${sectionNode.attribute("location")}]")
         sectionByName.put(sectionNode.attribute("name"), includeSection)
+        dependsOnScreenLocations.add(location)
 
         Map<String, ArrayList<MNode>> descMap = includeSection.sectionNode.descendants(
                 new HashSet<String>(['section', 'section-iterate', 'section-include', 'form-single', 'form-list', 'tree']))
@@ -171,14 +181,20 @@ class ScreenDefinition {
         for (MNode inclRefNode in descMap.get('section-iterate'))
             sectionByName.put(inclRefNode.attribute("name"), includeScreen.getSection(inclRefNode.attribute("name")))
         // recurse for section-include
-        for (MNode inclRefNode in descMap.get('section-include'))
-            pullSectionInclude(inclRefNode)
+        for (MNode inclRefNode in descMap.get('section-include')) pullSectionInclude(inclRefNode)
 
         // see if the included section contains any FORMS or TREES, need to reference those here too!
-        for (MNode formNode in descMap.get('form-single'))
-            formByName.put(formNode.attribute("name"), includeScreen.getForm(formNode.attribute("name")))
-        for (MNode formNode in descMap.get('form-list'))
-            formByName.put(formNode.attribute("name"), includeScreen.getForm(formNode.attribute("name")))
+        for (MNode formNode in descMap.get('form-single')) {
+            ScreenForm inclForm = includeScreen.getForm(formNode.attribute("name"))
+            if (inclForm.extendsScreenLocation != null) dependsOnScreenLocations.add(inclForm.extendsScreenLocation)
+            formByName.put(formNode.attribute("name"), inclForm)
+        }
+        for (MNode formNode in descMap.get('form-list')) {
+            ScreenForm inclForm = includeScreen.getForm(formNode.attribute("name"))
+            if (inclForm.extendsScreenLocation != null) dependsOnScreenLocations.add(inclForm.extendsScreenLocation)
+            formByName.put(formNode.attribute("name"), inclForm)
+        }
+
         for (MNode treeNode in descMap.get('tree'))
             treeByName.put(treeNode.attribute("name"), includeScreen.getTree(treeNode.attribute("name")))
     }
@@ -262,7 +278,7 @@ class ScreenDefinition {
     /** Get macro template location specific to screen from marco-template elements */
     String getMacroTemplateLocation(String renderMode) {
         if (macroTemplateByRenderMode == null) return null
-        return macroTemplateByRenderMode.get(renderMode)
+        return (String) macroTemplateByRenderMode.get(renderMode)
     }
 
     Map<String, ParameterItem> getParameterMap() { return parameterByName }
@@ -426,13 +442,14 @@ class ScreenDefinition {
         String requireAuthentication = screenNode.attribute('require-authentication')
         ArtifactExecutionInfoImpl aei = new ArtifactExecutionInfoImpl(location,
                 ArtifactExecutionInfo.AT_XML_SCREEN, ArtifactExecutionInfo.AUTHZA_VIEW)
-        sri.ec.artifactExecutionImpl.pushInternal(aei, isTargetScreen ? (!requireAuthentication || requireAuthentication == "true") : false)
+        sri.ec.artifactExecutionImpl.pushInternal(aei, isTargetScreen ?
+                (requireAuthentication == null || requireAuthentication.length() == 0 || "true".equals(requireAuthentication)) : false)
 
         boolean loggedInAnonymous = false
-        if (requireAuthentication == "anonymous-all") {
+        if ("anonymous-all".equals(requireAuthentication)) {
             sri.ec.artifactExecution.setAnonymousAuthorizedAll()
             loggedInAnonymous = sri.ec.getUser().loginAnonymousIfNoUser()
-        } else if (requireAuthentication == "anonymous-view") {
+        } else if ("anonymous-view".equals(requireAuthentication)) {
             sri.ec.artifactExecution.setAnonymousAuthorizedView()
             loggedInAnonymous = sri.ec.getUser().loginAnonymousIfNoUser()
         }
@@ -495,17 +512,17 @@ class ScreenDefinition {
         protected Class valueGroovy = null
         protected boolean required = false
 
-        ParameterItem(MNode parameterNode, String location) {
+        ParameterItem(MNode parameterNode, String location, ExecutionContextFactoryImpl ecfi) {
             this.name = parameterNode.attribute("name")
             if (parameterNode.attribute("required") == "true") required = true
 
-            if (parameterNode.attribute("from")) fromFieldGroovy = new GroovyClassLoader().parseClass(
+            if (parameterNode.attribute("from")) fromFieldGroovy = ecfi.getGroovyClassLoader().parseClass(
                     parameterNode.attribute("from"), StupidUtilities.cleanStringForJavaName("${location}.parameter_${name}.from_field"))
 
             valueString = parameterNode.attribute("value")
             if (valueString != null && valueString.length() == 0) valueString = null
             if (valueString != null && valueString.contains('${')) {
-                valueGroovy = new GroovyClassLoader().parseClass(('"""' + parameterNode.attribute("value") + '"""'),
+                valueGroovy = ecfi.getGroovyClassLoader().parseClass(('"""' + parameterNode.attribute("value") + '"""'),
                         StupidUtilities.cleanStringForJavaName("${location}.parameter_${name}.value"))
             }
         }
@@ -523,7 +540,7 @@ class ScreenDefinition {
                 }
             }
             if (value == null) value = ec.context.getByString(name)
-            if (value == null && ec.web) value = ec.web.parameters.get(name)
+            if (value == null && ec.web != null) value = ec.web.parameters.get(name)
             return value
         }
     }
@@ -565,9 +582,10 @@ class ScreenDefinition {
             readOnly = transitionNode.attribute("read-only") == "true"
             requireSessionToken = transitionNode.attribute("require-session-token") != "false"
 
+            ExecutionContextFactoryImpl ecfi = parentScreen.sfi.ecfi
             // parameter
             for (MNode parameterNode in transitionNode.children("parameter"))
-                parameterByName.put(parameterNode.attribute("name"), new ParameterItem(parameterNode, location))
+                parameterByName.put(parameterNode.attribute("name"), new ParameterItem(parameterNode, location, ecfi))
             // path-parameter
             if (transitionNode.hasChild("path-parameter")) {
                 pathParameterList = new ArrayList()
@@ -753,16 +771,34 @@ class ScreenDefinition {
     }
     /** Special automatic transition to manage Saved Finds for form-list with saved-finds=true */
     static class FormSavedFindsTransitionItem extends TransitionItem {
+        protected ResponseItem noneResponse = null
+
         FormSavedFindsTransitionItem(ScreenDefinition parentScreen) {
             super(parentScreen)
             name = "formSaveFind"; method = "any"; location = "${parentScreen.location}.transition\$${name}";
             transitionNode = null; beginTransaction = true; readOnly = false; requireSessionToken = false;
             defaultResponse = new ResponseItem(new MNode("default-response", [url:"."]), this, parentScreen)
+            noneResponse = new ResponseItem(new MNode("default-response", [type:"none"]), this, parentScreen)
         }
 
         ResponseItem run(ScreenRenderImpl sri) {
-            ScreenForm.processFormSavedFind(sri.getEc())
-            return defaultResponse
+            String formListFindId = ScreenForm.processFormSavedFind(sri.getEc())
+
+            if (formListFindId == null || sri.response == null) return defaultResponse
+
+            ScreenUrlInfo curUrlInfo = sri.getScreenUrlInfo()
+            ArrayList<String> curFpnl = new ArrayList<>(curUrlInfo.fullPathNameList)
+            // remove last path element, is transition name and we just want the screen this is from
+            curFpnl.remove(curFpnl.size() - 1)
+
+            ScreenUrlInfo fwdUrlInfo = ScreenUrlInfo.getScreenUrlInfo(sri, null, curFpnl, null, null)
+            ScreenUrlInfo.UrlInstance fwdInstance = fwdUrlInfo.getInstance(sri, null)
+
+            Map<String, Object> flfInfo = ScreenForm.getFormListFindInfo(formListFindId, sri.getEc(), null)
+            fwdInstance.addParameters((Map<String, String>) flfInfo.findParameters)
+
+            sri.response.sendRedirect(fwdInstance.getUrlWithParams())
+            return noneResponse
         }
     }
 
@@ -791,17 +827,18 @@ class ScreenDefinition {
                         location + ".condition")
             }
 
+            ExecutionContextFactoryImpl ecfi = parentScreen.sfi.ecfi
             type = responseNode.attribute("type") ?: "url"
             url = responseNode.attribute("url")
             urlType = responseNode.attribute("url-type") ?: "screen-path"
-            if (responseNode.attribute("parameter-map")) parameterMapNameGroovy = new GroovyClassLoader().parseClass(
-                    responseNode.attribute("parameter-map"), "${location}.parameter_map")
+            if (responseNode.attribute("parameter-map")) parameterMapNameGroovy = ecfi.getGroovyClassLoader()
+                    .parseClass(responseNode.attribute("parameter-map"), "${location}.parameter_map")
             // deferred for future version: saveLastScreen = responseNode."@save-last-screen" == "true"
             saveCurrentScreen = responseNode.attribute("save-current-screen") == "true"
             saveParameters = responseNode.attribute("save-parameters") == "true"
 
             for (MNode parameterNode in responseNode.children("parameter"))
-                parameterMap.put(parameterNode.attribute("name"), new ParameterItem(parameterNode, location))
+                parameterMap.put(parameterNode.attribute("name"), new ParameterItem(parameterNode, location, ecfi))
         }
 
         boolean checkCondition(ExecutionContextImpl ec) { return condition ? condition.checkCondition(ec) : true }
@@ -855,8 +892,8 @@ class ScreenDefinition {
             menuIndex = subscreensItem.attribute("menu-index") ? (subscreensItem.attribute("menu-index") as Integer) : null
             menuInclude = (!subscreensItem.attribute("menu-include") || subscreensItem.attribute("menu-include") == "true")
 
-            if (subscreensItem.attribute("disable-when")) disableWhenGroovy = new GroovyClassLoader().parseClass(
-                    subscreensItem.attribute("disable-when"), "${parentScreen.location}.subscreens_item_${name}.disable_when")
+            if (subscreensItem.attribute("disable-when")) disableWhenGroovy = parentScreen.sfi.ecfi.getGroovyClassLoader()
+                    .parseClass(subscreensItem.attribute("disable-when"), "${parentScreen.location}.subscreens_item_${name}.disable_when")
             if (subscreensItem.attribute("tenants-allowed")) {
                 String tenantsAllowedStr = subscreensItem.attribute("tenants-allowed")
                 tenantsAllowed = new TreeSet(tenantsAllowedStr.split(',') as List)

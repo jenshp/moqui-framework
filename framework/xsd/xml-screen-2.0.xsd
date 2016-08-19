@@ -93,16 +93,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </xs:simpleType>
             </xs:attribute>
 
-            <xs:attribute name="require-authentication" default="true">
-                <xs:simpleType>
-                    <xs:restriction base="xs:token">
-                        <xs:enumeration value="true"/>
-                        <xs:enumeration value="false"/>
-                        <xs:enumeration value="anonymous-all"/>
-                        <xs:enumeration value="anonymous-view"/>
-                    </xs:restriction>
-                </xs:simpleType>
-            </xs:attribute>
+            <xs:attribute name="require-authentication" type="authc-options" default="true"/>
             <!-- TABLED, not to be part of 1.0: <xs:attribute name="require-certificate" default="false" type="boolean"/> -->
             <xs:attribute name="begin-transaction" type="boolean" default="false">
                 <xs:annotation><xs:documentation>
@@ -285,7 +276,7 @@ along with this software (see the LICENSE.md file). If not, see
     </xs:element>
     <xs:element name="path-parameter">
         <xs:complexType>
-            <xs:attribute name="name" type="name-lower" use="required"/>
+            <xs:attribute name="name" type="name-parameter" use="required"/>
         </xs:complexType>
     </xs:element>
     <xs:element name="conditional-response">
@@ -410,7 +401,7 @@ along with this software (see the LICENSE.md file). If not, see
 
     <xs:element name="transition-include">
         <xs:complexType>
-            <xs:attribute name="name" type="name-lower" use="required"/>
+            <xs:attribute name="name" type="name-package" use="required"/>
             <xs:attribute name="location" type="xs:string" use="required"/>
             <xs:attribute name="method" type="xs:string"/>
         </xs:complexType>
@@ -559,7 +550,7 @@ along with this software (see the LICENSE.md file). If not, see
     <xs:element name="section" substitutionGroup="AllWidgets">
         <xs:complexType>
             <xs:group ref="section-elements"/>
-            <xs:attribute name="name" type="name-upper" use="required">
+            <xs:attribute name="name" type="name-plain" use="required">
                 <xs:annotation><xs:documentation>A name for the section, used for reference within the screen.
                     Must be specified and must be unique within the screen.</xs:documentation></xs:annotation>
             </xs:attribute>
@@ -572,7 +563,7 @@ along with this software (see the LICENSE.md file). If not, see
     <xs:element name="section-iterate" substitutionGroup="AllWidgets">
         <xs:complexType>
             <xs:group ref="section-elements"/>
-            <xs:attribute name="name" type="name-upper" use="required">
+            <xs:attribute name="name" type="name-plain" use="required">
                 <xs:annotation><xs:documentation>
                     A name for the section, used for external reference within the screen.
                 </xs:documentation></xs:annotation>
@@ -621,7 +612,7 @@ along with this software (see the LICENSE.md file). If not, see
 
     <xs:element name="section-include" substitutionGroup="AllWidgets">
         <xs:complexType>
-            <xs:attribute name="name" type="name-upper" use="required">
+            <xs:attribute name="name" type="name-plain" use="required">
                 <xs:annotation><xs:documentation>
                     A name for the section, used for reference within the screen.
                     Must be specified and must be unique within the screen.

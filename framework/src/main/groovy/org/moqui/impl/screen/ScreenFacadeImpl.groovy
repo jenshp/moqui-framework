@@ -147,8 +147,27 @@ public class ScreenFacadeImpl implements ScreenFacade {
         ScreenDefinition permSd = (ScreenDefinition) screenLocationPermCache.get(location)
         if (permSd != null) {
             // check to see if file has been modified, if we know when it was last modified
-            if (permSd.sourceLastModified != null && screenRr.supportsLastModified() &&
-                    permSd.sourceLastModified.equals(screenRr.getLastModified())) {
+            boolean modified = true
+            if (screenRr.supportsLastModified()) {
+                long rrLastModified = screenRr.getLastModified()
+                modified = permSd.screenLoadedTime < rrLastModified
+                // see if any screens it depends on (any extends, etc) have been modified
+                if (!modified) {
+                    for (String dependLocation in permSd.dependsOnScreenLocations) {
+                        ScreenDefinition dependSd = getScreenDefinition(dependLocation)
+                        if (dependSd.sourceLastModified == null) { modified = true; break; }
+                        if (dependSd.sourceLastModified > permSd.screenLoadedTime) {
+                            // logger.info("Screen ${location} depends on ${dependLocation}, modified ${dependSd.sourceLastModified} > ${permSd.screenLoadedTime}")
+                            modified = true; break;
+                        }
+                    }
+                }
+            }
+
+            if (modified) {
+                screenLocationPermCache.remove(location)
+                logger.info("Reloading modified screen ${location}")
+            } else {
                 //logger.warn("========= screen expired but hasn't changed so reusing: ${location}")
 
                 // call this just in case a new screen was added, note this does slow things down just a bit, but only in dev (not in production)
@@ -156,20 +175,17 @@ public class ScreenFacadeImpl implements ScreenFacade {
 
                 screenLocationCache.put(location, permSd)
                 return permSd
-            } else {
-                screenLocationPermCache.remove(location)
-                logger.info("Screen modified since last loaded, reloading: ${location}")
             }
         }
 
         MNode screenNode = MNode.parse(screenRr)
         if (screenNode == null) {
-            throw new IllegalArgumentException("Cound not find definition for screen at location [${location}]")
+            throw new IllegalArgumentException("Cound not find definition for screen location ${location}")
         }
 
         sd = new ScreenDefinition(this, screenNode, location)
         // logger.warn("========= loaded screen [${location}] supports LM ${screenRr.supportsLastModified()}, LM: ${screenRr.getLastModified()}")
-        sd.sourceLastModified = screenRr.supportsLastModified() ? screenRr.getLastModified() : null
+        if (screenRr.supportsLastModified()) sd.sourceLastModified = screenRr.getLastModified()
         screenLocationCache.put(location, sd)
         if (screenRr.supportsLastModified()) screenLocationPermCache.put(location, sd)
         return sd
@@ -200,16 +216,16 @@ public class ScreenFacadeImpl implements ScreenFacade {
 
     Template getTemplateByMode(String renderMode) {
         Template template = (Template) screenTemplateModeCache.get(renderMode)
-        if (template) return template
+        if (template != null) return template
 
         template = makeTemplateByMode(renderMode)
-        if (!template) throw new IllegalArgumentException("Could not find screen render template for mode [${renderMode}]")
+        if (template == null) throw new IllegalArgumentException("Could not find screen render template for mode [${renderMode}]")
         return template
     }
 
     protected synchronized Template makeTemplateByMode(String renderMode) {
         Template template = (Template) screenTemplateModeCache.get(renderMode)
-        if (template) return template
+        if (template != null) return template
 
         MNode stoNode = ecfi.getConfXmlRoot().first("screen-facade")
                 .first({ MNode it -> it.name == "screen-text-output" && it.attribute("type") == renderMode })
@@ -232,13 +248,13 @@ public class ScreenFacadeImpl implements ScreenFacade {
 
     Template getTemplateByLocation(String templateLocation) {
         Template template = (Template) screenTemplateLocationCache.get(templateLocation)
-        if (template) return template
+        if (template != null) return template
         return makeTemplateByLocation(templateLocation)
     }
 
     protected synchronized Template makeTemplateByLocation(String templateLocation) {
         Template template = (Template) screenTemplateLocationCache.get(templateLocation)
-        if (template) return template
+        if (template != null) return template
 
         // NOTE: this is a special case where we need something to call #recurse so that all includes can be straight libraries
         String rootTemplate = """<#include "${templateLocation}"/><#visit widgetsNode>"""

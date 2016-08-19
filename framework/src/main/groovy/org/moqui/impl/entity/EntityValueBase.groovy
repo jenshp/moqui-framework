@@ -56,9 +56,9 @@ abstract class EntityValueBase implements EntityValue {
     private String entityName
     private final Map<String, Object> valueMap = new HashMap<>()
 
-    protected transient EntityFacadeImpl efiTransient = null
-    protected transient TransactionCache txCacheInternal = null
-    protected transient EntityDefinition entityDefinitionTransient = null
+    protected transient EntityFacadeImpl efiTransient = (EntityFacadeImpl) null
+    protected transient TransactionCache txCacheInternal = (TransactionCache) null
+    protected transient EntityDefinition entityDefinitionTransient = (EntityDefinition) null
 
     /* Original DB Value Map: not used unless the value has been modified from its original state from the DB */
     private transient Map<String, Object> dbValueMap = (Map<String, Object>) null
@@ -86,14 +86,15 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     void writeExternal(ObjectOutput out) throws IOException {
         // NOTE: found that the serializer in Hazelcast is REALLY slow with writeUTF(), uses String.chatAt() in a for loop, crazy
-        out.writeObject(entityName.toCharArray())
-        out.writeObject(tenantId.toCharArray())
+        // NOTE2: in Groovy this results in castToType() overhead anyway, so for now use writeUTF/readUTF as other serialization might be more efficient
+        out.writeUTF(entityName)
+        out.writeUTF(tenantId)
         out.writeObject(valueMap)
     }
     @Override
     void readExternal(ObjectInput objectInput) throws IOException, ClassNotFoundException {
-        entityName = new String((char[]) objectInput.readObject())
-        tenantId = new String((char[]) objectInput.readObject())
+        entityName = objectInput.readUTF()
+        tenantId = objectInput.readUTF()
         valueMap.putAll((Map<String, Object>) objectInput.readObject())
     }
 
@@ -145,12 +146,15 @@ abstract class EntityValueBase implements EntityValue {
     Map getMap() {
         // call get() for each field for localization, etc
         Map theMap = new LinkedHashMap()
-        ArrayList<String> allFieldNames = getEntityDefinition().getAllFieldNames()
-        for (int i = 0; i < allFieldNames.size(); i++) {
-            String fieldName = (String) allFieldNames.get(i)
-            Object fieldValue = get(fieldName)
+
+        EntityDefinition ed = getEntityDefinition()
+        ArrayList<FieldInfo> allFieldInfos = ed.getAllFieldInfoList()
+        int allFieldInfosSize = allFieldInfos.size()
+        for (int i = 0; i < allFieldInfosSize; i++) {
+            FieldInfo fieldInfo = (FieldInfo) allFieldInfos.get(i)
+            Object fieldValue = getKnownField(fieldInfo)
             // NOTE DEJ20151117 also put nulls in Map, make more complete, removed: if (fieldValue != null)
-            theMap.put(fieldName, fieldValue)
+            theMap.put(fieldInfo.name, fieldValue)
         }
         return theMap
     }
@@ -160,14 +164,13 @@ abstract class EntityValueBase implements EntityValue {
         EntityDefinition ed = getEntityDefinition()
 
         FieldInfo fieldInfo = ed.getFieldInfo(name)
-        // if this is a simple field (is field, no l10n, not user field) just get the value right away (vast majority of use)
-        if (fieldInfo != null && fieldInfo.isSimple) return valueMap.get(name)
-
-        if (fieldInfo == null) {
+        if (fieldInfo != null) {
+            return getKnownField(fieldInfo)
+        } else {
             // if this is not a valid field name but is a valid relationship name, do a getRelated or getRelatedOne to return an EntityList or an EntityValue
             RelationshipInfo relInfo = ed.getRelationshipInfo(name)
             // logger.warn("====== get related relInfo: ${relInfo}")
-            if (relInfo!= null) {
+            if (relInfo != null) {
                 if (relInfo.isTypeOne) {
                     return this.findRelatedOne(name, null, null)
                 } else {
@@ -178,40 +181,70 @@ abstract class EntityValueBase implements EntityValue {
                 throw new EntityException("The name [${name}] is not a valid field name or relationship name for entity [${entityName}]")
             }
         }
+    }
+
+    private Object getKnownField(FieldInfo fieldInfo) {
+        EntityDefinition ed = fieldInfo.ed
+        String name = fieldInfo.name
+        // if this is a simple field (is field, no l10n, not user field) just get the value right away (vast majority of use)
+        if (fieldInfo.isSimple) return valueMap.get(name)
 
         // if enabled use moqui.basic.LocalizedEntityField for any localized fields
         if (fieldInfo.enableLocalization) {
             String localeStr = getEntityFacadeImpl().ecfi.getExecutionContext().getUser().getLocale()?.toString()
-            if (localeStr) {
+            if (localeStr != null) {
                 Object internalValue = valueMap.get(name)
 
                 boolean knownNoLocalized = false
                 if (localizedByLocaleByField == null) {
                     localizedByLocaleByField = new HashMap<String, Map<String, String>>()
                 } else {
-                    Map<String, String> localizedByLocale = localizedByLocaleByField.get(name)
+                    Map<String, String> localizedByLocale = (Map<String, String>) localizedByLocaleByField.get(name)
                     if (localizedByLocale != null) {
-                        if (localizedByLocale.containsKey(localeStr)) {
-                            String cachedLocalized = localizedByLocale.get(localeStr)
-                            if (cachedLocalized) {
-                                // logger.warn("======== field ${name}:${internalValue} found cached localized ${cachedLocalized}")
-                                return cachedLocalized
-                            } else {
-                                // logger.warn("======== field ${name}:${internalValue} known no localized")
-                                knownNoLocalized = true
-                            }
+                        String cachedLocalized = localizedByLocale.get(localeStr)
+                        if (cachedLocalized != null && cachedLocalized.length() > 0) {
+                            // logger.warn("======== field ${name}:${internalValue} found cached localized ${cachedLocalized}")
+                            return cachedLocalized
+                        } else {
+                            // logger.warn("======== field ${name}:${internalValue} known no localized")
+                            knownNoLocalized = localizedByLocale.containsKey(localeStr)
                         }
                     }
                 }
 
                 if (!knownNoLocalized) {
-                    List<String> pks = ed.getPkFieldNames()
+                    List<String> pks
+                    MNode aliasNode = null
+                    String memberEntityName = null
+                    if (ed.isViewEntity() && !ed.isDynamicViewEntity()) {
+                        // NOTE: there are issues with dynamic view entities here, may be possible to fix them but for now not running for EntityDynamicView
+                        aliasNode = ed.getFieldNode(name)
+                        memberEntityName = ed.getMemberEntityName(aliasNode.attribute('entity-alias'))
+                        EntityDefinition memberEd = getEntityFacadeImpl().getEntityDefinition(memberEntityName)
+                        pks = memberEd.getPkFieldNames()
+                    } else {
+                        pks = ed.getPkFieldNames()
+                    }
                     if (pks.size() == 1) {
-                        String pkValue = get(pks.get(0))
-                        if (pkValue) {
+                        String pk = pks.get(0)
+                        if (ed.isViewEntity()) {
+                            pk = null
+                            Map<String, String> pkToAliasMap = ed.getMePkFieldToAliasNameMap(aliasNode.attribute('entity-alias'))
+                            Set<String> pkSet = pkToAliasMap.keySet()
+                            if (pkSet.size() == 1) pk = pkToAliasMap.get(pkSet.iterator().next())
+                        }
+                        String pkValue = pk != null ? get(pk): null
+                        if (pkValue != null) {
                             // logger.warn("======== field ${name}:${internalValue} finding LocalizedEntityField, localizedByLocaleByField=${localizedByLocaleByField}")
+                            String entityName = ed.getFullEntityName()
+                            String fieldName = name
+                            if (ed.isViewEntity()) {
+                                entityName = memberEntityName
+                                fieldName = aliasNode.attribute('field')?: aliasNode.attribute('name')
+                                // logger.warn("localizing field for ViewEntity ${ed.fullEntityName} field ${name}, using entityName: ${entityName}, fieldName: ${fieldName}, pkValue: ${pkValue}, locale: ${localeStr}")
+                            }
                             EntityFind lefFind = getEntityFacadeImpl().find("moqui.basic.LocalizedEntityField")
-                            lefFind.condition([entityName:ed.getFullEntityName(), fieldName:name, pkValue:pkValue, locale:localeStr] as Map<String, Object>)
+                            lefFind.condition([entityName:entityName, fieldName:fieldName, pkValue:pkValue, locale:localeStr] as Map<String, Object>)
                             EntityValue lefValue = lefFind.useCache(true).one()
                             if (lefValue != null) {
                                 String localized = (String) lefValue.localized
@@ -298,6 +331,9 @@ abstract class EntityValueBase implements EntityValue {
     }
 
     @Override
+    Object getNoCheckSimple(String name) { return valueMap.get(name) }
+
+    @Override
     Object getOriginalDbValue(String name) {
         return (dbValueMap != null && dbValueMap.containsKey(name)) ? dbValueMap.get(name) : valueMap.get(name)
     }
@@ -345,8 +381,11 @@ abstract class EntityValueBase implements EntityValue {
 
     @Override
     String getString(String name) {
-        Object valueObj = this.get(name)
-        return entityDefinition.getFieldString(name, valueObj)
+        EntityDefinition ed = getEntityDefinition()
+        FieldInfo fieldInfo = ed.getFieldInfo(name)
+
+        Object valueObj = getKnownField(fieldInfo)
+        return entityDefinition.getFieldInfoString(fieldInfo, valueObj)
     }
 
     @Override
@@ -452,7 +491,7 @@ abstract class EntityValueBase implements EntityValue {
 
         Integer highestSeqVal = null
         for (EntityValue curValue in allValues) {
-            String currentSeqId = curValue.getString(seqFieldName)
+            String currentSeqId = (String) curValue.getNoCheckSimple(seqFieldName)
             if (currentSeqId) {
                 try {
                     int seqVal = Integer.parseInt(currentSeqId)
@@ -586,19 +625,19 @@ abstract class EntityValueBase implements EntityValue {
         EntityDefinition ed = getEntityDefinition()
 
         // get pkPrimaryValue, pkSecondaryValue, pkRestCombinedValue (just like the AuditLog stuff)
-        ArrayList<String> pkFieldList = new ArrayList(ed.getPkFieldNames())
-        String firstPkField = pkFieldList.size() > 0 ? pkFieldList.remove(0) : null
-        String secondPkField = pkFieldList.size() > 0 ? pkFieldList.remove(0) : null
+        ArrayList<FieldInfo> pkFieldList = new ArrayList(ed.getPkFieldInfoList())
+        FieldInfo firstPkField = pkFieldList.size() > 0 ? pkFieldList.remove(0) : null
+        FieldInfo secondPkField = pkFieldList.size() > 0 ? pkFieldList.remove(0) : null
         StringBuffer pkTextSb = new StringBuffer()
         for (int i = 0; i < pkFieldList.size(); i++) {
-            String fieldName = pkFieldList.get(i)
+            FieldInfo curFieldInfo = (FieldInfo) pkFieldList.get(i)
             if (i > 0) pkTextSb.append(",")
-            pkTextSb.append(fieldName).append(":'").append(ed.getFieldStringForFile(fieldName, get(fieldName))).append("'")
+            pkTextSb.append(curFieldInfo.name).append(":'").append(ed.getFieldStringForFile(curFieldInfo, getKnownField(curFieldInfo))).append("'")
         }
         String pkText = pkTextSb.toString()
 
-        if (firstPkField) parms.pkPrimaryValue = get(firstPkField)
-        if (secondPkField) parms.pkSecondaryValue = get(secondPkField)
+        if (firstPkField) parms.pkPrimaryValue = getKnownField(firstPkField)
+        if (secondPkField) parms.pkSecondaryValue = getKnownField(secondPkField)
         if (pkText) parms.pkRestCombinedValue = pkText
     }
 
@@ -1012,18 +1051,37 @@ abstract class EntityValueBase implements EntityValue {
     Set<Map.Entry<String, Object>> entrySet() {
         // everything needs to go through the get method, so iterate through the fields and get the values
         List<String> allFieldNames = getEntityDefinition().getAllFieldNames()
+        ArrayList<FieldInfo> allFieldInfos = getEntityDefinition().getAllFieldInfoList()
         Set<Map.Entry<String, Object>> entries = new HashSet()
-        for (String fieldName in allFieldNames) entries.add(new EntityFieldEntry(fieldName, this))
+        int allFieldInfosSize = allFieldInfos.size()
+        for (int i = 0; i < allFieldInfosSize; i++) {
+            FieldInfo fi = (FieldInfo) allFieldInfos.get(i)
+            entries.add(new EntityFieldEntry(fi, this))
+        }
         return entries
     }
 
     static class EntityFieldEntry implements Map.Entry<String, Object> {
-        protected String key
+        protected FieldInfo fi
         protected EntityValueBase evb
-        EntityFieldEntry(String key, EntityValueBase evb) { this.key = key; this.evb = evb; }
-        String getKey() { return key }
-        Object getValue() { return evb.get(key) }
-        Object setValue(Object v) { return evb.set(key, v) }
+        EntityFieldEntry(FieldInfo fi, EntityValueBase evb) { this.fi = fi; this.evb = evb; }
+        String getKey() { return fi.name }
+        Object getValue() { return evb.getKnownField(fi) }
+        Object setValue(Object v) { return evb.set(fi.name, v) }
+        @Override
+        int hashCode() {
+            Object val = getValue()
+            return fi.name.hashCode() + (val != null ? val.hashCode() : 0)
+        }
+        @Override
+        boolean equals(Object obj) {
+            if (obj instanceof EntityFieldEntry) {
+                EntityFieldEntry other = (EntityFieldEntry) obj
+                return fi.name.equals(other.fi.name) && getValue() == other.getValue()
+            } else {
+                return false
+            }
+        }
     }
 
     // ========== Object Override Methods ==========
@@ -1049,6 +1107,17 @@ abstract class EntityValueBase implements EntityValue {
 
     abstract EntityValue cloneValue();
     abstract EntityValue cloneDbValue(boolean getOld);
+
+    // ========== GroovyObject Override Methods ==========
+
+    @Override
+    Object getProperty(String property) {
+        return get(property)
+    }
+    @Override
+    void setProperty(String property, Object newValue) {
+        put(property, newValue)
+    }
 
     // =========== The CrUD and abstract methods ===========
 
@@ -1088,7 +1157,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     EntityValue create() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1130,7 +1199,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "create", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "create", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, 1L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, 1L)
         } finally {
             // pop the ArtifactExecutionInfo to clean it up
             ec.getArtifactExecution().pop(aei)
@@ -1183,7 +1252,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     EntityValue update() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1219,7 +1288,7 @@ abstract class EntityValueBase implements EntityValue {
 
         // Save original values before anything is changed for DataFeed and audit log
         Map<String, Object> originalValues = dbValueMap != null && dbValueMap.size() > 0 ?
-                new HashMap<String, Object>(dbValueMap) : null
+                new HashMap<String, Object>(dbValueMap) : (Map<String, Object>) null
 
         // do the artifact push/authz
         ArtifactExecutionInfoImpl aei = new ArtifactExecutionInfoImpl(ed.getFullEntityName(),
@@ -1277,7 +1346,7 @@ abstract class EntityValueBase implements EntityValue {
             TransactionCache curTxCache = getTxCache(ecfi)
             if (curTxCache == null || !curTxCache.update(this)) {
                 // no TX cache update, etc: ready to do actual update
-                this.basicUpdate(pkFieldList, nonPkFieldList, null, ec)
+                this.basicUpdate(pkFieldList, nonPkFieldList, (Connection) null, ec)
             }
 
             // clear the entity cache
@@ -1288,7 +1357,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "update", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "update", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, 1L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, 1L)
         } finally {
             // pop the ArtifactExecutionInfo to clean it up
             ec.getArtifactExecution().pop(aei)
@@ -1376,7 +1445,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     EntityValue delete() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1411,7 +1480,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "delete", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "delete", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, 1L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, 1L)
         } finally {
             // pop the ArtifactExecutionInfo to clean it up
             ec.getArtifactExecution().pop(aei)
@@ -1448,7 +1517,7 @@ abstract class EntityValueBase implements EntityValue {
     @Override
     boolean refresh() {
         long startTimeNanos = System.nanoTime()
-        long startTime = startTimeNanos/1E6 as long
+        long startTime = System.currentTimeMillis()
         EntityDefinition ed = getEntityDefinition()
         EntityFacadeImpl efi = getEntityFacadeImpl()
         ExecutionContextFactoryImpl ecfi = efi.getEcfi()
@@ -1486,7 +1555,7 @@ abstract class EntityValueBase implements EntityValue {
             efi.runEecaRules(ed.getFullEntityName(), this, "find-one", false)
             // count the artifact hit
             ecfi.countArtifactHit(ArtifactExecutionInfo.AT_ENTITY, "refresh", ed.getFullEntityName(), getPrimaryKeys(),
-                    startTime, (System.nanoTime() - startTimeNanos)/1E6, retVal ? 1L : 0L)
+                    startTime, (System.nanoTime() - startTimeNanos)/1000000.0D, retVal ? 1L : 0L)
 
         } finally {
             // pop the ArtifactExecutionInfo to clean it up
