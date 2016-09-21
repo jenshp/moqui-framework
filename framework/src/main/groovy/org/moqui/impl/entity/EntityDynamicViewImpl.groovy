@@ -24,7 +24,7 @@ class EntityDynamicViewImpl implements EntityDynamicView {
     protected EntityFindImpl entityFind;
 
     protected String entityName = "DynamicView"
-    protected MNode entityNode = new MNode("view-entity", ["package-name":"moqui.internal", "entity-name":"DynamicView", "is-dynamic-view":"true"])
+    protected MNode entityNode = new MNode("view-entity", ["package":"dynamic", "entity-name":"DynamicView", "is-dynamic-view":"true"])
 
     EntityDynamicViewImpl(EntityFindImpl entityFind) {
         this.entityFind = entityFind
@@ -49,7 +49,7 @@ class EntityDynamicViewImpl implements EntityDynamicView {
             memberEntity.attributes.put("join-optional", (joinOptional ? "true" : "false"))
         }
         if (entityKeyMaps) for (Map.Entry<String, String> keyMapEntry in entityKeyMaps.entrySet()) {
-            memberEntity.append("key-map", ["field-name":keyMapEntry.getKey(), "related-field-name":keyMapEntry.getValue()])
+            memberEntity.append("key-map", ["field-name":keyMapEntry.getKey(), "related":keyMapEntry.getValue()])
         }
         return this
     }
@@ -60,8 +60,8 @@ class EntityDynamicViewImpl implements EntityDynamicView {
         MNode joinFromMemberEntityNode =
                 entityNode.first({ MNode it -> it.name == "member-entity" && it.attribute("entity-alias") == joinFromAlias })
         String entityName = joinFromMemberEntityNode.attribute("entity-name")
-        EntityDefinition joinFromEd = entityFind.getEfi().getEntityDefinition(entityName)
-        EntityDefinition.RelationshipInfo relInfo = joinFromEd.getRelationshipInfo(relationshipName)
+        EntityDefinition joinFromEd = entityFind.efi.getEntityDefinition(entityName)
+        EntityJavaUtil.RelationshipInfo relInfo = joinFromEd.getRelationshipInfo(relationshipName)
         if (relInfo == null) throw new EntityException("Relationship not found with name [${relationshipName}] on entity [${entityName}]")
 
         Map<String, String> relationshipKeyMap = relInfo.keyMap
@@ -69,7 +69,7 @@ class EntityDynamicViewImpl implements EntityDynamicView {
         memberEntity.attributes.put("join-from-alias", joinFromAlias)
         memberEntity.attributes.put("join-optional", (joinOptional ? "true" : "false"))
         for (Map.Entry<String, String> keyMapEntry in relationshipKeyMap.entrySet()) {
-            memberEntity.append("key-map", ["field-name":keyMapEntry.getKey(), "related-field-name":keyMapEntry.getValue()])
+            memberEntity.append("key-map", ["field-name":keyMapEntry.getKey(), "related":keyMapEntry.getValue()])
         }
         return this
     }
@@ -99,9 +99,9 @@ class EntityDynamicViewImpl implements EntityDynamicView {
 
     @Override
     EntityDynamicView addRelationship(String type, String title, String relatedEntityName, Map<String, String> entityKeyMaps) {
-        MNode viewLink = entityNode.append("relationship", ["type":type, "title":title, "related-entity-name":relatedEntityName])
+        MNode viewLink = entityNode.append("relationship", ["type":type, "title":title, "related":relatedEntityName])
         for (Map.Entry<String, String> keyMapEntry in entityKeyMaps.entrySet()) {
-            viewLink.append("key-map", ["field-name":keyMapEntry.getKey(), "related-field-name":keyMapEntry.getValue()])
+            viewLink.append("key-map", ["field-name":keyMapEntry.getKey(), "related":keyMapEntry.getValue()])
         }
         return this
     }

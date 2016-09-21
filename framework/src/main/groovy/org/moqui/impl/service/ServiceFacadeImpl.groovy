@@ -13,7 +13,6 @@
  */
 package org.moqui.impl.service
 
-import groovy.json.JsonBuilder
 import groovy.transform.CompileStatic
 import org.moqui.context.ResourceReference
 import org.moqui.context.ToolFactory
@@ -26,38 +25,30 @@ import org.moqui.impl.service.runner.EntityAutoServiceRunner
 import org.moqui.impl.service.runner.RemoteJsonRpcServiceRunner
 import org.moqui.service.*
 import org.moqui.util.MNode
-import org.quartz.*
-import org.quartz.impl.StdSchedulerFactory
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 import javax.cache.Cache
 import javax.mail.internet.MimeMessage
-import java.sql.Timestamp
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentMap
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.ExecutorService
+import java.util.concurrent.*
 
 @CompileStatic
 class ServiceFacadeImpl implements ServiceFacade {
     protected final static Logger logger = LoggerFactory.getLogger(ServiceFacadeImpl.class)
 
-    protected final ExecutionContextFactoryImpl ecfi
+    public final ExecutionContextFactoryImpl ecfi
 
     protected final Cache<String, ServiceDefinition> serviceLocationCache
 
     protected final Map<String, ArrayList<ServiceEcaRule>> secaRulesByServiceName = new HashMap<>()
     protected final List<EmailEcaRule> emecaRuleList = new ArrayList()
-    protected RestApi restApi
+    public final RestApi restApi
 
     protected final Map<String, ServiceRunner> serviceRunners = new HashMap()
 
-    /** The Quartz Scheduler object */
-    protected final Scheduler scheduler = StdSchedulerFactory.getDefaultScheduler()
-    protected final Map<String, Object> schedulerInfoMap
+    private final ScheduledJobRunner jobRunner
 
-    /** Hazelcast Distributed ExecutorService for async services, etc */
+    /** Distributed ExecutorService for async services, etc */
     protected final ExecutorService distributedExecutorService
 
     protected final ConcurrentMap<String, List<ServiceCallback>> callbackRegistry = new ConcurrentHashMap<>()
@@ -83,31 +74,34 @@ class ServiceFacadeImpl implements ServiceFacade {
         }
 
         // get distributed ExecutorService
-        String distEsFactoryName = serviceFacadeNode.attribute("distributed-factory") ?: "HazelcastExecutor"
-        logger.info("Getting Async Distributed Service ExecutorService (using ToolFactory ${distEsFactoryName})")
-        ToolFactory<ExecutorService> esToolFactory = ecfi.getToolFactory(distEsFactoryName)
-        if (esToolFactory == null) {
-            logger.warn("Could not find ExecutorService ToolFactory with name ${distEsFactoryName}, distributed async service calls will be run local only")
-            distributedExecutorService = null
+        String distEsFactoryName = serviceFacadeNode.attribute("distributed-factory")
+        if (distEsFactoryName) {
+            logger.info("Getting Async Distributed Service ExecutorService (using ToolFactory ${distEsFactoryName})")
+            ToolFactory<ExecutorService> esToolFactory = ecfi.getToolFactory(distEsFactoryName)
+            if (esToolFactory == null) {
+                logger.warn("Could not find ExecutorService ToolFactory with name ${distEsFactoryName}, distributed async service calls will be run local only")
+                distributedExecutorService = null
+            } else {
+                distributedExecutorService = esToolFactory.getInstance()
+            }
         } else {
-            distributedExecutorService = esToolFactory.getInstance()
+            logger.info("No distributed-factory specified, distributed async service calls will be run local only")
+            distributedExecutorService = null
         }
 
-        // prep data for scheduler history listeners
-        InetAddress localHost = ecfi.getLocalhostAddress()
-        schedulerInfoMap = [hostAddress:(localHost?.getHostAddress() ?: '127.0.0.1'),
-                hostName:(localHost?.getHostName() ?: 'localhost'), schedulerId:scheduler.getSchedulerInstanceId(),
-                schedulerName:scheduler.getSchedulerName()] as Map<String, Object>
-
-        // add listeners to Quartz Scheduler
-        scheduler.getListenerManager().addTriggerListener(new HistoryTriggerListener());
-        scheduler.getListenerManager().addSchedulerListener(new HistorySchedulerListener());
+        // setup service job runner
+        long jobRunnerRate = (serviceFacadeNode.attribute("scheduled-job-check-time") ?: "60") as long
+        if (jobRunnerRate > 0L) {
+            jobRunner = new ScheduledJobRunner(ecfi)
+            // wait 60 seconds before first run to make sure all is loaded and we're past an initial activity burst
+            ecfi.scheduledExecutor.scheduleAtFixedRate(jobRunner, 60, jobRunnerRate, TimeUnit.SECONDS)
+        } else {
+            jobRunner = null
+        }
     }
 
     void postInit() {
-        // init quartz scheduler (do last just in case it gets any jobs going right away)
-        scheduler.start()
-        // TODO: add a job to delete scheduler history
+        // no longer used, was used to start Quartz Scheduler
     }
 
     void warmCache()  {
@@ -124,20 +118,12 @@ class ServiceFacadeImpl implements ServiceFacade {
     void destroy() {
         // destroy all service runners
         for (ServiceRunner sr in serviceRunners.values()) sr.destroy()
-
-        // destroy quartz scheduler, after allowing currently executing jobs to complete
-        scheduler.shutdown(true)
     }
 
-    @CompileStatic
-    ExecutionContextFactoryImpl getEcfi() { return ecfi }
+    ServiceRunner getServiceRunner(String type) { serviceRunners.get(type) }
+    // NOTE: this is used in the ServiceJobList screen
+    ScheduledJobRunner getJobRunner() { jobRunner }
 
-    @CompileStatic
-    ServiceRunner getServiceRunner(String type) { return serviceRunners.get(type) }
-    @CompileStatic
-    RestApi getRestApi() { return restApi }
-
-    @CompileStatic
     boolean isServiceDefined(String serviceName) {
         ServiceDefinition sd = getServiceDefinition(serviceName)
         if (sd != null) return true
@@ -148,20 +134,17 @@ class ServiceFacadeImpl implements ServiceFacade {
         return isEntityAutoPattern(path, verb, noun)
     }
 
-    @CompileStatic
     boolean isEntityAutoPattern(String serviceName) {
         return isEntityAutoPattern(ServiceDefinition.getPathFromName(serviceName), ServiceDefinition.getVerbFromName(serviceName),
                 ServiceDefinition.getNounFromName(serviceName))
     }
 
-    @CompileStatic
     boolean isEntityAutoPattern(String path, String verb, String noun) {
         // if no path, verb is create|update|delete and noun is a valid entity name, do an implicit entity-auto
-        return !path && EntityAutoServiceRunner.verbSet.contains(verb) && getEcfi().getEntityFacade("DEFAULT").isEntityDefined(noun)
+        return (path == null || path.isEmpty()) && EntityAutoServiceRunner.verbSet.contains(verb) &&
+                ecfi.entityFacade.isEntityDefined(noun)
     }
 
-
-    @CompileStatic
     ServiceDefinition getServiceDefinition(String serviceName) {
         ServiceDefinition sd = (ServiceDefinition) serviceLocationCache.get(serviceName)
         if (sd != null) return sd
@@ -183,7 +166,6 @@ class ServiceFacadeImpl implements ServiceFacade {
         return makeServiceDefinition(serviceName, path, verb, noun)
     }
 
-    @CompileStatic
     protected synchronized ServiceDefinition makeServiceDefinition(String origServiceName, String path, String verb, String noun) {
         String cacheKey = makeCacheKey(path, verb, noun)
         if (serviceLocationCache.containsKey(cacheKey)) {
@@ -196,25 +178,24 @@ class ServiceFacadeImpl implements ServiceFacade {
             // NOTE: don't throw an exception for service not found (this is where we know there is no def), let service caller handle that
             // Put null in the cache to remember the non-existing service
             serviceLocationCache.put(cacheKey, null)
-            if (origServiceName != cacheKey) serviceLocationCache.put(origServiceName, null)
+            if (!origServiceName.equals(cacheKey)) serviceLocationCache.put(origServiceName, null)
             return null
         }
 
         ServiceDefinition sd = new ServiceDefinition(this, path, serviceNode)
         serviceLocationCache.put(cacheKey, sd)
-        if (origServiceName != cacheKey) serviceLocationCache.put(origServiceName, sd)
+        if (!origServiceName.equals(cacheKey)) serviceLocationCache.put(origServiceName, sd)
         return sd
     }
 
-    @CompileStatic
     protected static String makeCacheKey(String path, String verb, String noun) {
         // use a consistent format as the key in the cache, keeping in mind that the verb and noun may be merged in the serviceName passed in
         // no # here so that it doesn't matter if the caller used one or not
-        return (path ? path + '.' : '') + verb + (noun ? noun : '')
+        return (path != null && !path.isEmpty() ? path + '.' : '') + verb + (noun != null ? noun : '')
     }
 
     protected MNode findServiceNode(String path, String verb, String noun) {
-        if (!path) return null
+        if (path == null || path.isEmpty()) return null
 
         // make a file location from the path
         String partialLocation = path.replace('.', '/') + '.xml'
@@ -232,7 +213,7 @@ class ServiceFacadeImpl implements ServiceFacade {
                 // only way to see if it is a valid location is to try opening the stream, so no extra conditions here
                 serviceNode = findServiceNode(serviceComponentRr, verb, noun)
             }
-            if (serviceNode) break
+            if (serviceNode != null) break
         }
 
         // search for the service def XML file in the classpath LAST (allow components to override, same as in entity defs)
@@ -382,28 +363,22 @@ class ServiceFacadeImpl implements ServiceFacade {
         return numLoaded
     }
 
-    @CompileStatic
-    void runSecaRules(String serviceName, Map<String, Object> parameters, Map<String, Object> results, String when) {
+    ArrayList<ServiceEcaRule> secaRules(String serviceName) {
         // NOTE: no need to remove the hash, ServiceCallSyncImpl now passes a service name with no hash
-        // remove the hash if there is one to more consistently match the service name
-        // serviceName = StupidJavaUtilities.removeChar(serviceName, (char) '#')
-        ArrayList<ServiceEcaRule> lst = (ArrayList<ServiceEcaRule>) secaRulesByServiceName.get(serviceName)
-        if (lst != null && lst.size() > 0) {
-            ExecutionContextImpl eci = ecfi.getEci()
-            for (int i = 0; i < lst.size(); i++) {
-                ServiceEcaRule ser = (ServiceEcaRule) lst.get(i)
-                ser.runIfMatches(serviceName, parameters, results, when, eci)
-            }
+        return (ArrayList<ServiceEcaRule>) secaRulesByServiceName.get(serviceName)
+    }
+    static void runSecaRules(String serviceName, Map<String, Object> parameters, Map<String, Object> results, String when,
+                      ArrayList<ServiceEcaRule> lst, ExecutionContextImpl eci) {
+        int lstSize = lst.size()
+        for (int i = 0; i < lstSize; i++) {
+            ServiceEcaRule ser = (ServiceEcaRule) lst.get(i)
+            ser.runIfMatches(serviceName, parameters, results, when, eci)
         }
     }
-
-    @CompileStatic
-    void registerTxSecaRules(String serviceName, Map<String, Object> parameters, Map<String, Object> results) {
-        // NOTE: no need to remove the hash, ServiceCallSyncImpl now passes a service name with no hash
-        // remove the hash if there is one to more consistently match the service name
-        // serviceName = StupidJavaUtilities.removeChar(serviceName, (char) '#')
-        ArrayList<ServiceEcaRule> lst = secaRulesByServiceName.get(serviceName)
-        if (lst != null && lst.size() > 0) for (ServiceEcaRule ser in lst) {
+    void registerTxSecaRules(String serviceName, Map<String, Object> parameters, Map<String, Object> results, ArrayList<ServiceEcaRule> lst) {
+        int lstSize = lst.size()
+        for (int i = 0; i < lstSize; i++) {
+            ServiceEcaRule ser = (ServiceEcaRule) lst.get(i)
             if (ser.when.startsWith("tx-")) ser.registerTx(serviceName, parameters, results, ecfi)
         }
     }
@@ -444,40 +419,30 @@ class ServiceFacadeImpl implements ServiceFacade {
         if (logger.infoEnabled) logger.info("Loaded [${numLoaded}] Email ECA rules from [${rr.location}]")
     }
 
-    @CompileStatic
     void runEmecaRules(MimeMessage message, String emailServerId) {
         ExecutionContextImpl eci = ecfi.getEci()
         for (EmailEcaRule eer in emecaRuleList) eer.runIfMatches(message, emailServerId, eci)
     }
 
     @Override
-    @CompileStatic
     ServiceCallSync sync() { return new ServiceCallSyncImpl(this) }
-
     @Override
-    @CompileStatic
     ServiceCallAsync async() { return new ServiceCallAsyncImpl(this) }
+    @Override
+    ServiceCallJob job(String jobName) { return new ServiceCallJobImpl(jobName, this) }
 
     @Override
-    @CompileStatic
-    ServiceCallSchedule schedule() { return new ServiceCallScheduleImpl(this) }
-
-    @Override
-    @CompileStatic
     ServiceCallSpecial special() { return new ServiceCallSpecialImpl(this) }
 
     @Override
-    @CompileStatic
     Map<String, Object> callJsonRpc(String location, String method, Map<String, Object> parameters) {
         return RemoteJsonRpcServiceRunner.runJsonService(null, location, method, parameters, ecfi.getExecutionContext())
     }
 
     @Override
-    @CompileStatic
     RestClient rest() { return new RestClientImpl(ecfi) }
 
     @Override
-    @CompileStatic
     void registerCallback(String serviceName, ServiceCallback serviceCallback) {
         List<ServiceCallback> callbackList = callbackRegistry.get(serviceName)
         if (callbackList == null) {
@@ -498,190 +463,5 @@ class ServiceFacadeImpl implements ServiceFacade {
         List<ServiceCallback> callbackList = callbackRegistry.get(serviceName)
         if (callbackList != null && callbackList.size() > 0)
             for (ServiceCallback scb in callbackList) scb.receiveEvent(context, t)
-    }
-
-    @Override
-    @CompileStatic
-    Scheduler getScheduler() { return scheduler }
-
-    // ========== Quartz Listeners ==========
-
-    @CompileStatic
-    static boolean shouldSkipScheduleHistory(TriggerKey triggerKey) {
-        // filter out high-frequency, temporary jobs (these are mostly async service calls)
-        return triggerKey.getGroup() == "NowTrigger"
-    }
-
-    protected class HistorySchedulerListener implements SchedulerListener {
-        @Override
-        void jobScheduled(Trigger trigger) {
-            if (shouldSkipScheduleHistory(trigger.getKey())) return
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvJobScheduled",
-                        eventDate:new Timestamp(System.currentTimeMillis()), triggerGroup:trigger.getKey().getGroup(),
-                        triggerName:trigger.getKey().getName(), jobGroup:trigger.getJobKey().getGroup(),
-                        jobName:trigger.getJobKey().getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-        @Override
-        void jobUnscheduled(TriggerKey triggerKey) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvJobUnscheduled",
-                        eventDate:new Timestamp(System.currentTimeMillis()), triggerGroup:triggerKey.getGroup(),
-                        triggerName:triggerKey.getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-
-        @Override
-        void triggerPaused(TriggerKey triggerKey) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggerPaused",
-                        eventDate:new Timestamp(System.currentTimeMillis()), triggerGroup:triggerKey.getGroup(),
-                        triggerName:triggerKey.getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-        @Override
-        void triggersPaused(String triggerGroup) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggersPaused",
-                            eventDate:new Timestamp(System.currentTimeMillis()),
-                            triggerGroup:triggerGroup] as Map<String, Object>)).disableAuthz().call()
-        }
-
-        @Override
-        void triggerResumed(TriggerKey triggerKey) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggerResumed",
-                        eventDate:new Timestamp(System.currentTimeMillis()), triggerGroup:triggerKey.getGroup(),
-                        triggerName:triggerKey.getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-
-        @Override
-        void triggersResumed(String triggerGroup) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggersResumed",
-                        eventDate:new Timestamp(System.currentTimeMillis()),
-                        triggerGroup:triggerGroup] as Map<String, Object>)).disableAuthz().call()
-        }
-
-        @Override
-        void schedulerError(String msg, SchedulerException cause) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvSchedulerError",
-                        eventDate:new Timestamp(System.currentTimeMillis()), message:msg] as Map<String, Object>))
-                    .disableAuthz().call()
-            // TODO: do anything with the cause?
-        }
-
-        @Override
-        void schedulerInStandbyMode() { }
-        @Override
-        void schedulerStarting() { }
-        @Override
-        void schedulerStarted() { }
-        @Override
-        void schedulerShutdown() { }
-        @Override
-        void schedulerShuttingdown() { }
-
-        @Override
-        void schedulingDataCleared() { }
-
-        @Override
-        void jobAdded(JobDetail jobDetail) { }
-        @Override
-        void jobDeleted(JobKey jobKey) {
-            /* do nothing, no easy way to filter the high-frequency jobs:
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + [eventTypeEnumId:"SchEvJobDeleted",
-                    eventDate:new Timestamp(System.currentTimeMillis()),
-                    jobGroup:jobKey.getGroup(), jobName:jobKey.getName()]).disableAuthz().call()
-             */
-        }
-
-        @Override
-        void jobPaused(JobKey jobKey) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvJobPaused",
-                        eventDate:new Timestamp(System.currentTimeMillis()),
-                        jobGroup:jobKey.getGroup(), jobName:jobKey.getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-        @Override
-        void jobResumed(JobKey jobKey) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvJobResumed",
-                        eventDate:new Timestamp(System.currentTimeMillis()),
-                        jobGroup:jobKey.getGroup(), jobName:jobKey.getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-        @Override
-        void jobsPaused(String jobGroup) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvJobsPaused",
-                        eventDate:new Timestamp(System.currentTimeMillis()), jobGroup:jobGroup] as Map<String, Object>))
-                    .disableAuthz().call()
-        }
-        @Override
-        void jobsResumed(String jobGroup) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvJobsResumed",
-                        eventDate:new Timestamp(System.currentTimeMillis()), jobGroup:jobGroup] as Map<String, Object>))
-                    .disableAuthz().call()
-        }
-
-        @Override
-        void triggerFinalized(Trigger trigger) {
-            if (shouldSkipScheduleHistory(trigger.getKey())) return
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggerFinalized",
-                        eventDate:new Timestamp(System.currentTimeMillis()), triggerGroup:trigger.getKey().getGroup(),
-                        triggerName:trigger.getKey().getName(), jobGroup:trigger.getJobKey().getGroup(),
-                        jobName:trigger.getJobKey().getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-    }
-
-    protected class HistoryTriggerListener implements TriggerListener {
-        @Override
-        String getName() { return "Moqui.Service.HistoryTriggerListener" }
-
-        @Override
-        void triggerFired(Trigger trigger, JobExecutionContext context) {
-            if (shouldSkipScheduleHistory(trigger.getKey())) return
-            JsonBuilder jb = new JsonBuilder()
-            jb.call(context.getMergedJobDataMap())
-            String paramString = jb.toString()
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggerFired",
-                        eventDate:new Timestamp(context.getFireTime().getTime()),
-                        triggerGroup:trigger.getKey().getGroup(), triggerName:trigger.getKey().getName(),
-                        jobGroup:trigger.getJobKey().getGroup(), jobName:trigger.getJobKey().getName(),
-                        fireInstanceId:context.getFireInstanceId(), paramString:paramString] as Map<String, Object>))
-                    .disableAuthz().call()
-        }
-
-        @Override
-        boolean vetoJobExecution(Trigger trigger, JobExecutionContext context) { return false }
-
-        @Override
-        void triggerMisfired(Trigger trigger) {
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggerMisfired",
-                        eventDate:new Timestamp(System.currentTimeMillis()), triggerGroup:trigger.getKey().getGroup(),
-                        triggerName:trigger.getKey().getName(), jobGroup:trigger.getJobKey().getGroup(),
-                        jobName:trigger.getJobKey().getName()] as Map<String, Object>)).disableAuthz().call()
-        }
-
-        @Override
-        void triggerComplete(Trigger trigger, JobExecutionContext context,
-                                    Trigger.CompletedExecutionInstruction triggerInstructionCode) {
-            if (shouldSkipScheduleHistory(trigger.getKey())) return
-            JsonBuilder jb = new JsonBuilder()
-            jb.call(context.getMergedJobDataMap())
-            String paramString = jb.toString()
-            sync().name("create#moqui.service.scheduler.SchedulerHistory")
-                    .parameters(schedulerInfoMap + ([eventTypeEnumId:"SchEvTriggerComplete",
-                        eventDate:new Timestamp(context.getFireTime().getTime()),
-                        triggerGroup:trigger.getKey().getGroup(), triggerName:trigger.getKey().getName(),
-                        jobGroup:trigger.getJobKey().getGroup(), jobName:trigger.getJobKey().getName(),
-                        fireInstanceId:context.getFireInstanceId(), paramString:paramString,
-                        triggerInstructionCode:triggerInstructionCode.toString()] as Map<String, Object>))
-                    .disableAuthz().call()
-        }
     }
 }

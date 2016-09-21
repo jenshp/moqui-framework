@@ -160,8 +160,8 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:attribute name="multi" default="false" type="boolean">
                 <xs:annotation><xs:documentation>Make the form a multi-submit form where all rows on a page are
                     submitted together in a single request with a "_${rowNumber}" suffix on each field. Also passes a
-                    _isMulti=true parameter so the Service Facade knows to run the service (a single service-call in a
-                    transition) for each row. Defaults to true, so set to false to disable this behavior and have a
+                    _isMulti=true parameter so the Service Facade knows to run the service (for a single service-call in a
+                    transition) for each row. Defaults to false, so set to true to enable this behavior and have a
                     separate form (submitted separately) for each row.</xs:documentation></xs:annotation>
             </xs:attribute>
             <xs:attribute name="list" type="xs:string">
@@ -197,6 +197,24 @@ along with this software (see the LICENSE.md file). If not, see
             </xs:attribute>
             <xs:attribute name="saved-finds" type="boolean" default="false">
                 <xs:annotation><xs:documentation>Enable saved finds (query parameters, order by).</xs:documentation></xs:annotation>
+            </xs:attribute>
+            <xs:attribute name="show-csv-button" type="boolean" default="false">
+                <xs:annotation><xs:documentation>Show a button to export as CSV (renderMode=csv), if the pagination header is displayed</xs:documentation></xs:annotation>
+            </xs:attribute>
+            <xs:attribute name="show-text-button" type="boolean" default="false">
+                <xs:annotation><xs:documentation>Show a button to export as plain text (renderMode=text), if the pagination header
+                    is displayed. Because fixed-width text output is limited by nature and the default of evenly sizing all columns
+                    is not very useful in most cases, this should only be set to true when the field.@print-width and @align
+                    attributes are used for the form-list.</xs:documentation></xs:annotation>
+            </xs:attribute>
+            <xs:attribute name="show-pdf-button" type="boolean" default="false">
+                <xs:annotation><xs:documentation>Show a button to render the screen as XSL-FO (renderMode=xsl-fo) and convert to
+                    PDF, if the pagination header is displayed. Because fixed-width text output is limited by nature and the default
+                    of evenly sizing all columns is not very useful in most cases, this should only be set to true when the
+                    field.@print-width and @align attributes are used for the form-list.</xs:documentation></xs:annotation>
+            </xs:attribute>
+            <xs:attribute name="show-all-button" type="boolean" default="false">
+                <xs:annotation><xs:documentation>Show a button to display all results (pageNoLimit=true), if the pagination header is displayed</xs:documentation></xs:annotation>
             </xs:attribute>
             <xs:attribute name="dynamic" type="boolean" default="false">
                 <xs:annotation><xs:documentation>If true then this form will be considered dynamic and the internal
@@ -243,15 +261,18 @@ along with this software (see the LICENSE.md file). If not, see
         <xs:complexType>
             <xs:choice minOccurs="0" maxOccurs="unbounded">
                 <xs:element ref="field-group"/>
-                <xs:element ref="field-row"/>
-                <xs:element ref="field-row-big"/>
+                <xs:element name="field-accordion"><xs:complexType>
+                    <xs:sequence><xs:element maxOccurs="unbounded" ref="field-group"/></xs:sequence>
+                    <xs:attribute name="collapsible" type="boolean"/>
+                    <xs:attribute name="active" type="xs:string"><xs:annotation><xs:documentation>If collapsible=true use this
+                        to specify the accordion section index to be open, or false for all to be closed.</xs:documentation></xs:annotation></xs:attribute>
+                </xs:complexType></xs:element>
                 <xs:element ref="field-ref"/>
                 <xs:element ref="fields-not-referenced"/>
+                <xs:element ref="field-row"/>
+                <xs:element ref="field-row-big"/>
             </xs:choice>
             <xs:attribute name="id" type="xs:string"/>
-            <xs:attribute name="collapsible" type="boolean"/>
-            <xs:attribute name="active" type="xs:string"><xs:annotation><xs:documentation>If collapsible=true use this
-                to specify the accordion section index to be open, or false for all to be closed.</xs:documentation></xs:annotation></xs:attribute>
         </xs:complexType>
     </xs:element>
     <xs:element name="field-group">
@@ -260,6 +281,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:element ref="field-ref"/>
                 <xs:element ref="fields-not-referenced"/>
                 <xs:element ref="field-row"/>
+                <xs:element ref="field-row-big"/>
             </xs:choice>
             <xs:attribute name="title" type="xs:string" use="required"/>
             <xs:attribute name="style" type="xs:string"/>
@@ -285,11 +307,10 @@ along with this software (see the LICENSE.md file). If not, see
         <xs:annotation><xs:documentation>Fields in this set will be in the same column in the list form table.</xs:documentation></xs:annotation>
         <xs:complexType>
             <xs:sequence><xs:element minOccurs="0" maxOccurs="unbounded" ref="field-ref"/></xs:sequence>
-            <xs:attribute name="style" type="xs:string"/>
         </xs:complexType>
     </xs:element>
     <xs:element name="field-ref">
-        <xs:complexType><xs:attribute name="name" type="name-lower" use="required"/></xs:complexType>
+        <xs:complexType><xs:attribute name="name" type="name-parameter" use="required"/></xs:complexType>
     </xs:element>
     <xs:element name="fields-not-referenced">
         <xs:annotation><xs:documentation>Fields not explicitly referenced will be inserted where this element is. If
@@ -494,7 +515,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:element minOccurs="0" ref="default-field"/>
                 <!-- tabled, not to be part of 1.0: <xs:element minOccurs="0" maxOccurs="unbounded" ref="visible-when"/> -->
             </xs:sequence>
-            <xs:attribute name="name" type="name-lower" use="required">
+            <xs:attribute name="name" type="name-parameter" use="required">
                 <xs:annotation><xs:documentation>A unique name for this field. Used for the parameter name, referencing
                     the field in other places, etc.</xs:documentation></xs:annotation>
             </xs:attribute>
@@ -516,6 +537,28 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:attribute name="validate-parameter" type="xs:string"/>
             <xs:attribute name="validate-entity" type="xs:string"/>
             <xs:attribute name="validate-field" type="xs:string"/>
+
+            <xs:attribute name="print-width" type="xs:nonNegativeInteger"><xs:annotation><xs:documentation>
+                Column width when printing (formatted text, xsl-fo render modes); when there are multiple fields in a
+                column the highest width is used; not on form-list-column because that is dynamic with select-columns.
+
+                By default display, display-entity, are printed and link is printed if it is an anchor (not a button).
+                Set to zero (0) to not print this field.
+            </xs:documentation></xs:annotation></xs:attribute>
+            <xs:attribute name="print-width-type" default="percent"><xs:annotation><xs:documentation>The type of print
+                width, default to percent and can be characters.</xs:documentation></xs:annotation>
+                <xs:simpleType><xs:restriction base="xs:token">
+                    <xs:enumeration value="percent"/>
+                    <xs:enumeration value="characters"/>
+                </xs:restriction></xs:simpleType>
+            </xs:attribute>
+            <xs:attribute name="align" default="left">
+                <xs:simpleType><xs:restriction base="xs:token">
+                    <xs:enumeration value="left"/>
+                    <xs:enumeration value="center"/>
+                    <xs:enumeration value="right"/>
+                </xs:restriction></xs:simpleType>
+            </xs:attribute>
         </xs:complexType>
     </xs:element>
     <xs:element name="header-field">
@@ -530,6 +573,7 @@ along with this software (see the LICENSE.md file). If not, see
                     <xs:element minOccurs="0" ref="SubFields"/>
                     <xs:element minOccurs="0" maxOccurs="unbounded" ref="AllWidgets"/>
                 </xs:choice>
+                <xs:element minOccurs="0" maxOccurs="unbounded" ref="StandaloneFields"/>
                 <xs:element minOccurs="0" maxOccurs="unbounded" ref="set"/>
             </xs:sequence>
             <xs:attribute name="title" type="xs:string">
@@ -729,6 +773,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:annotation><xs:documentation>Used to format the output of Number/Time/Date/Timestamp/etc objects.
                     With auto-fields-service will inherit from service parameter.</xs:documentation></xs:annotation>
             </xs:attribute>
+            <xs:attribute name="text-format" type="xs:string"><xs:annotation><xs:documentation>
+                Used to format the output of Number/Time/Date/Timestamp/etc objects for text output.</xs:documentation></xs:annotation></xs:attribute>
             <xs:attribute name="encode" default="true" type="boolean">
                 <xs:annotation><xs:documentation>
                     If true the text will be encoded so that it does not interfere with markup of the target output.
@@ -744,12 +790,11 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:attribute name="key-field-name" type="xs:string"/>
             <xs:attribute name="use-cache" default="true" type="boolean"/>
             <xs:attribute name="text" type="xs:string" default="${description}"/>
+            <xs:attribute name="default-text" type="xs:string"><xs:annotation><xs:documentation>
+                Displayed if no record found.</xs:documentation></xs:annotation></xs:attribute>
             <xs:attribute name="also-hidden" default="true" type="boolean"/>
-            <xs:attribute name="encode" default="true" type="boolean">
-                <xs:annotation><xs:documentation>
-                    If true text will be encoded so that it does not interfere with markup of the target output.
-                </xs:documentation></xs:annotation>
-            </xs:attribute>
+            <xs:attribute name="encode" default="true" type="boolean"><xs:annotation><xs:documentation>
+                If true text will be encoded so that it does not interfere with markup of the target output.</xs:documentation></xs:annotation></xs:attribute>
         </xs:complexType>
     </xs:element>
     <xs:element name="drop-down" substitutionGroup="SubFields">

@@ -34,7 +34,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:element minOccurs="0" ref="out-parameters"/>
                 <xs:element minOccurs="0" ref="actions"/>
             </xs:sequence>
-            <xs:attribute name="verb" type="name-lower" use="required">
+            <xs:attribute name="verb" type="name-field" use="required">
                 <xs:annotation><xs:documentation>
                     This can be any verb, and will often be one of: create, update, store, delete, or find. The full name of
                     the service will be: "${path}.${verb}#${noun}". The verb is required and the noun is optional so if
@@ -89,9 +89,6 @@ along with this software (see the LICENSE.md file). If not, see
                     in they will be used for the service call even if a user is logged in to the ExecutionContext that
                     the service is running in.
 
-                    An "authTenantId" parameter may also be specified to authenticate the user in a specific tenant
-                    instance. If specified will be used to run the service with that as the context tenant.
-
                     If set to anonymous-all or anonymous-view then not only will authentication not be required, but this
                     service will run as if authorized (using the _NA_ UserAccount) for all actions or for view-only.
                 </xs:documentation></xs:annotation>
@@ -113,6 +110,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:annotation><xs:documentation>Defaults to true. Set to false to not validate input parameters, and
                     not automatically remove unspecified parameters.</xs:documentation></xs:annotation>
             </xs:attribute>
+
             <xs:attribute name="transaction" default="use-or-begin" type="transaction-options"/>
             <xs:attribute name="transaction-timeout" type="xs:int">
                 <xs:annotation><xs:documentation>
@@ -121,6 +119,9 @@ along with this software (see the LICENSE.md file). If not, see
                     use-or-begin or cache and there is no other transaction already in place).
                 </xs:documentation></xs:annotation>
             </xs:attribute>
+            <xs:attribute name="no-tx-cache" type="boolean" default="false"><xs:annotation><xs:documentation>
+                If true and a TransactionCache is active flush and remove it before calling the service.</xs:documentation></xs:annotation></xs:attribute>
+
             <!-- not supported by Atomikos/etc right now, consider for later:
             <xs:attribute name="transaction-isolation" type="isolation-level" use="optional">
                 <xs:annotation><xs:documentation>
@@ -209,7 +210,7 @@ along with this software (see the LICENSE.md file). If not, see
     </xs:element>
     <xs:element name="exclude">
         <xs:complexType>
-            <xs:attribute name="field-name" type="name-lower" use="required"/>
+            <xs:attribute name="field-name" type="name-field" use="required"/>
         </xs:complexType>
     </xs:element>
 
@@ -218,7 +219,6 @@ along with this software (see the LICENSE.md file). If not, see
         <xs:complexType>
             <xs:sequence>
                 <xs:element minOccurs="0" ref="description"/>
-                <xs:element minOccurs="0" maxOccurs="unbounded" ref="subtype"/>
                 <xs:choice minOccurs="0" maxOccurs="unbounded">
                     <xs:element ref="auto-parameters"/>
                     <xs:element ref="parameter">
@@ -230,7 +230,7 @@ along with this software (see the LICENSE.md file). If not, see
                         inside the element.</xs:documentation></xs:annotation>
                 </xs:element>
             </xs:sequence>
-            <xs:attribute name="name" type="name-lower" use="required">
+            <xs:attribute name="name" type="name-parameter" use="required">
                 <xs:annotation><xs:documentation>The name of the parameter, matches against the key of an entry in the
                     parameters Map passed into or returned from the service.</xs:documentation></xs:annotation>
             </xs:attribute>
@@ -263,7 +263,7 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:annotation><xs:documentation>Optional name of an entity with a field that this parameter is
                     associated with.</xs:documentation></xs:annotation>
             </xs:attribute>
-            <xs:attribute name="field-name" type="name-lower">
+            <xs:attribute name="field-name" type="name-field">
                 <xs:annotation><xs:documentation>Optional field name within the named entity that this parameter is
                     associated with. Most useful for form fields defined automatically from the service parameter.
                     This is automatically populated when parameters are defined automatically with the auto-parameters
@@ -306,21 +306,6 @@ along with this software (see the LICENSE.md file). If not, see
             </xs:simpleType>
         </xs:attribute>
     </xs:attributeGroup>
-
-    <xs:element name="subtype">
-        <xs:annotation><xs:documentation>
-            The valid type if the parameter.type or the parent subtype is a Map or any type of collection.
-
-            If the parent type is a Map then the key should be a String and the value should be the type of the subtype
-            where the key attribute matches the Map key, or for all other Map keys not specified the subtype with no
-            key specified.
-        </xs:documentation></xs:annotation>
-        <xs:complexType>
-            <xs:sequence><xs:element minOccurs="0" maxOccurs="unbounded" ref="subtype"/></xs:sequence>
-            <xs:attribute name="key" type="xs:string"/>
-            <xs:attribute name="type" type="xs:string" use="required"/>
-        </xs:complexType>
-    </xs:element>
 
     <xs:element name="val-or" substitutionGroup="ParameterValidations">
         <xs:complexType>

@@ -5,32 +5,33 @@
     <!-- Settings in this file can be overridden in a component (MoquiConf.xml) and/or runtime conf file that has
         any of the desired sub-elements. -->
 
-    <!-- Default properties are only set if there is no System property of the same name -->
-    <default-property name="ds_transactional_user" value="sa"/>
-    <default-property name="ds_transactional_password" value="sa"/>
-    <default-property name="ds_transactional_url" value="jdbc:h2:${moqui_runtime}/db/h2/MoquiDEFAULT"/>
+    <!-- Default properties are only set if there is no Java property or environment variable of the same name (or with underscores replaced by dots) -->
+    <default-property name="webapp_http_host" value=""/>
+    <default-property name="webapp_http_port" value=""/>
+    <default-property name="webapp_https_port" value=""/>
+    <default-property name="webapp_https_enabled" value="false"/>
 
-    <tools empty-db-load="seed" worker-queue="65535" worker-pool-core="4" worker-pool-max="16" worker-pool-alive="60">
+    <default-property name="entity_ds_db_conf" value="h2"/>
+    <default-property name="entity_ds_host" value="localhost"/>
+    <default-property name="entity_ds_port" value=""/>
+    <default-property name="entity_ds_database" value="moqui"/>
+    <default-property name="entity_ds_url" value="jdbc:h2:${moqui_runtime}/db/h2/${entity_ds_database};lock_timeout=30000"/>
+    <default-property name="entity_ds_schema" value=""/>
+    <default-property name="entity_ds_user" value="sa"/>
+    <default-property name="entity_ds_password" value="sa"/>
+
+    <tools empty-db-load="seed,seed-initial,install" worker-queue="65535" worker-pool-core="4" worker-pool-max="16" worker-pool-alive="60">
         <tool-factory class="org.moqui.jcache.MCacheToolFactory" init-priority="03" disabled="false"/>
 
-        <!-- Hazelcast distributed tool set for caching, topics, executors, etc -->
-        <tool-factory class="org.moqui.impl.tools.HazelcastToolFactory" init-priority="05" disabled="false"/>
-        <tool-factory class="org.moqui.impl.tools.HazelcastCacheToolFactory" init-priority="06" disabled="false"/>
-        <tool-factory class="org.moqui.impl.tools.HazelcastDciTopicToolFactory" init-priority="07" disabled="false"/>
-        <tool-factory class="org.moqui.impl.tools.HazelcastExecutorToolFactory" init-priority="08" disabled="false"/>
         <!-- Apache Commons JCS, an alternative for distributed caches (cannot be used as local cache as requires Serializable keys/values just like Hazelcast) -->
-        <tool-factory class="org.moqui.impl.tools.JCSCacheToolFactory" init-priority="09" disabled="true"/>
+        <!-- <tool-factory class="org.moqui.impl.tools.JCSCacheToolFactory" init-priority="09" disabled="true"/> -->
 
         <tool-factory class="org.moqui.impl.tools.H2ServerToolFactory" init-priority="12" disabled="false"/>
-
-        <tool-factory class="org.moqui.impl.tools.ElasticSearchToolFactory" init-priority="15" disabled="false"/>
-        <tool-factory class="org.moqui.impl.service.camel.CamelToolFactory" init-priority="20" disabled="false"/>
-        <tool-factory class="org.moqui.impl.tools.KieToolFactory" init-priority="25" disabled="false"/>
 
         <tool-factory class="org.moqui.impl.tools.JackrabbitRunToolFactory" init-priority="40" disabled="true"/>
     </tools>
 
-    <cache-list warm-on-start="true" local-factory="MCache" distributed-factory="HazelcastCache">
+    <cache-list warm-on-start="true" local-factory="MCache" distributed-factory="MCache">
         <!-- Entity Database Record Caches (and cache clear assist data) -->
         <!-- set type="distributed" to use the distributed cache -->
         <cache name="entity.record.one." max-elements="20000" eviction-strategy="least-frequently-used"
@@ -41,16 +42,16 @@
                 key-type="org.moqui.entity.EntityCondition" value-type="Long"/>
 
         <cache name="entity.record.one_ra." max-elements="40000" eviction-strategy="least-frequently-used"
-                key-type="org.moqui.entity.EntityCondition" value-type="ArrayList"/>
+                key-type="org.moqui.entity.EntityCondition" value-type="Set"/>
         <cache name="entity.record.one_view_ra." max-elements="40000" eviction-strategy="least-frequently-used"
-                key-type="org.moqui.entity.EntityCondition" value-type="ArrayList"/>
+                key-type="org.moqui.entity.EntityCondition" value-type="Set"/>
         <cache name="entity.record.one_bf" max-elements="1000" eviction-strategy="least-frequently-used"
                 value-type="Set"/>
 
         <cache name="entity.record.list_ra." max-elements="20000" eviction-strategy="least-frequently-used"
-                key-type="org.moqui.entity.EntityCondition" value-type="ArrayList"/>
+                key-type="org.moqui.entity.EntityCondition" value-type="Set"/>
         <cache name="entity.record.list_view_ra." max-elements="20000" eviction-strategy="least-frequently-used"
-                key-type="org.moqui.entity.EntityCondition" value-type="ArrayList"/>
+                key-type="org.moqui.entity.EntityCondition" value-type="Set"/>
 
         <!-- Framework configuration and artifact caches -->
         <!-- NOTE: Production mode by default - No expiration of conf and impl artifacts. -->
@@ -61,37 +62,34 @@
         <!-- this is info for each entity for real-time push DataFeeds; expires every 15 min to get DataFeed and DataDocument updates -->
         <cache name="entity.data.feed.info" expire-time-live="900" value-type="ArrayList"/>
 
-        <cache name="service.location" tenants-share="true" value-type="org.moqui.impl.service.ServiceDefinition"/>
-        <cache name="kie.component.releaseId" tenants-share="true" value-type="org.kie.api.builder.ReleaseId"/>
-        <cache name="kie.session.component" tenants-share="true" value-type="String"/>
+        <cache name="service.location" value-type="org.moqui.impl.service.ServiceDefinition"/>
+        <cache name="service.rest.api" value-type="org.moqui.impl.service.RestApi$ResourceNode"/>
+        <cache name="kie.component.releaseId" value-type="org.kie.api.builder.ReleaseId"/>
+        <cache name="kie.session.component" value-type="String"/>
 
-        <!-- TODO: Potential issue for multi-tenant where DbForm*, SubscreenItem, etc comes from wrong tenant...
-            would need to change ScreenFacadeImpl to get cache per tenant too, maybe even init ScreenFacadeImpl under ECI instead of ECFI (would be slower) -->
-        <cache name="screen.location" tenants-share="true" value-type="org.moqui.impl.screen.ScreenDefinition"/>
-        <cache name="screen.location.perm" tenants-share="true" value-type="org.moqui.impl.screen.ScreenDefinition"/>
-        <cache name="screen.url" tenants-share="true" value-type="org.moqui.impl.screen.ScreenUrlInfo"/>
-        <cache name="screen.info" tenants-share="true" value-type="List"/>
-        <cache name="screen.info.ref.rev" tenants-share="true" value-type="Set"/>
-        <cache name="screen.template.mode" tenants-share="true" value-type="freemarker.template.Template"/>
-        <cache name="screen.template.location" tenants-share="true" value-type="freemarker.template.Template"/>
-        <cache name="widget.template.location" tenants-share="true" value-type="MNode"/>
-        <cache name="screen.find.path" tenants-share="true" value-type="ArrayList"/>
-        <cache name="screen.form.db.node" tenants-share="true" value-type="MNode"/>
+        <cache name="screen.location" value-type="org.moqui.impl.screen.ScreenDefinition"/>
+        <cache name="screen.location.perm" value-type="org.moqui.impl.screen.ScreenDefinition"/>
+        <cache name="screen.url" value-type="org.moqui.impl.screen.ScreenUrlInfo"/>
+        <cache name="screen.info" value-type="List"/>
+        <cache name="screen.info.ref.rev" value-type="Set"/>
+        <cache name="screen.template.mode" value-type="freemarker.template.Template"/>
+        <cache name="screen.template.location" value-type="freemarker.template.Template"/>
+        <cache name="widget.template.location" value-type="MNode"/>
+        <cache name="screen.find.path" value-type="ArrayList"/>
+        <cache name="screen.form.db.node" value-type="MNode"/>
 
-        <!-- TODO: Potential issue for multi-tenant where DbResource, etc comes from wrong tenant...
-            would need to change ResourceFacadeImpl to get cache per tenant too, maybe even init ResourceFacadeImpl under ECI instead of ECFI (would be slower) -->
-        <cache name="resource.xml-actions.location" tenants-share="true" value-type="org.moqui.impl.actions.XmlAction"/>
-        <cache name="resource.groovy.location" tenants-share="true" value-type="java.lang.Class"/>
-        <cache name="resource.javascript.location" tenants-share="true" value-type="java.lang.Class"/>
+        <cache name="resource.xml-actions.location" value-type="org.moqui.impl.actions.XmlAction"/>
+        <cache name="resource.groovy.location" value-type="java.lang.Class"/>
+        <cache name="resource.javascript.location" value-type="java.lang.Class"/>
 
         <!-- These caches must be local caches (use additional methods on MCache not in javax.cache.Cache) -->
-        <cache name="resource.ftl.location" tenants-share="true" value-type="freemarker.template.Template" type="local"/>
-        <cache name="resource.gstring.location" tenants-share="true" value-type="groovy.text.Template" type="local"/>
-        <cache name="resource.wiki.location" tenants-share="true" value-type="String" type="local"/>
-        <cache name="resource.markdown.location" tenants-share="true" value-type="String" type="local"/>
-        <cache name="resource.text.location" tenants-share="true" value-type="String" type="local"/>
+        <cache name="resource.ftl.location" value-type="freemarker.template.Template" type="local"/>
+        <cache name="resource.gstring.location" value-type="groovy.text.Template" type="local"/>
+        <cache name="resource.wiki.location" value-type="String" type="local"/>
+        <cache name="resource.markdown.location" value-type="String" type="local"/>
+        <cache name="resource.text.location" value-type="String" type="local"/>
 
-        <cache name="resource.reference.location" tenants-share="true" value-type="org.moqui.context.ResourceReference"/>
+        <cache name="resource.reference.location" value-type="org.moqui.context.ResourceReference"/>
 
         <cache name="l10n.message" expire-time-idle="3600" max-elements="50000" value-type="String"/>
 
@@ -101,7 +99,7 @@
     <server-stats bin-length-seconds="900" visit-enabled="true" visit-ip-info-on-login="true" visitor-enabled="true">
         <!-- these are meant to be good production settings -->
         <artifact-stats type="AT_XML_SCREEN" persist-bin="true" persist-hit="true"/>
-        <artifact-stats type="AT_XML_SCREEN_CONTENT" persist-bin="true" persist-hit="true"/>
+        <artifact-stats type="AT_XML_SCREEN_CONTENT" persist-bin="true" persist-hit="false"/>
         <artifact-stats type="AT_XML_SCREEN_TRANS" persist-bin="true" persist-hit="true"/>
         <artifact-stats type="AT_SERVICE" persist-bin="true" persist-hit="false"/>
         <artifact-stats type="AT_ENTITY" persist-bin="false"/>
@@ -109,8 +107,9 @@
 
     <webapp-list>
         <!-- The webapp.@name is looked up based on the value of the 'moqui-name' context-param in the web.xml file -->
-        <webapp name="webroot" http-port="" http-host="" https-port="" https-host=""
-                https-enabled="false" require-session-token="true">
+        <webapp name="webroot" http-port="${webapp_http_port}" http-host="${webapp_http_host}" https-port="${webapp_https_port}"
+                https-host="${webapp_http_host}" https-enabled="${webapp_https_enabled}"
+                require-session-token="true" websocket-timeout="600000">
             <!-- root and error screens for OOTB runtime directory (moqui/moqui-runtime repository) -->
             <root-screen host=".*" location="component://webroot/screen/webroot.xml"/>
             <error-screen error="unauthorized" screen-path="error/Unauthorized"/>
@@ -128,44 +127,6 @@
             <before-shutdown><actions><log level="info" message="========================== before-shutdown actions"/></actions></before-logout>
             -->
 
-            <!-- Hazelcast Session Replication Filter Configuration -->
-            <filter name="hazelcast-filter" class="com.hazelcast.web.WebFilter">
-                <!-- Do you want to use an existing HazelcastInstance? Default is null. -->
-                <init-param name="instance-name" value="moqui"/>
-                <!-- Configuration xml location; * as servlet resource OR * as classpath resource OR * as URL
-                    Default is one of hazelcast-default.xml or hazelcast.xml in classpath. -->
-                <!-- <init-param name="config-location" value="/WEB-INF/hazelcast.xml"/> -->
-                <init-param name="use-client" value="false"/>
-                <!-- Name of the distributed map storing your web session objects -->
-                <init-param name="map-name" value="my-sessions"/>
-                <!-- TTL value of the distributed map storing your web session objects. Any integer between 0 and Integer.MAX_VALUE. Default is 1800 which is 30 minutes. -->
-                <init-param name="session-ttl-seconds" value="3600"/>
-                <!-- How is your load-balancer configured? sticky-session means all requests of a session is routed to the node
-                  where the session is first created. This is excellent for performance. If sticky-session is set to false, when a
-                  session is updated on a node, entry for this session on all other nodes is invalidated. You have to know how your
-                  load-balancer is configured before setting this parameter. Default is true.
-                -->
-                <init-param name="sticky-session" value="true"/>
-                <!-- Name of session id cookie -->
-                <init-param name="cookie-name" value="hazelcast.sessionId"/>
-                <!-- Domain of session id cookie. Default is based on incoming request. -->
-                <!-- <init-param name="cookie-domain" value=".mywebsite.com"/> -->
-                <!-- Should cookie only be sent using a secure protocol? Default is false. -->
-                <init-param name="cookie-secure" value="false"/>
-                <!-- Should HttpOnly attribute be set on cookie ? Default is false. -->
-                <init-param name="cookie-http-only" value="false"/>
-                <!-- Are you debugging? Default is false. -->
-                <init-param name="debug" value="false"/>
-                <!-- Do you want to shutdown HazelcastInstance during web application undeploy process? Default is true. -->
-                <init-param name="shutdown-on-destroy" value="false"/>
-                <!-- Do you want to cache sessions locally in each instance? Default is false. -->
-                <init-param name="deferred-write" value="false"/>
-
-                <url-pattern>/*</url-pattern>
-                <dispatcher>FORWARD</dispatcher><dispatcher>INCLUDE</dispatcher><dispatcher>REQUEST</dispatcher>
-            </filter>
-            <listener class="com.hazelcast.web.SessionListener"/>
-
             <!-- Moqui Session Listener (necessary to handle expired sessions, etc) -->
             <listener class="org.moqui.impl.webapp.MoquiSessionListener"/>
 
@@ -175,13 +136,12 @@
             <servlet name="MoquiFopServlet" class="org.moqui.impl.webapp.MoquiFopServlet" load-on-startup="1">
                 <url-pattern>/fop/*</url-pattern>
             </servlet>
-            <servlet name="H2Console" class="org.h2.server.web.WebServlet" load-on-startup="1">
-                <!-- <init-param name="webAllowOthers" value=""/><init-param name="trace" value=""/> -->
-                <url-pattern>/h2/*</url-pattern>
-            </servlet>
 
             <!-- timeout session in 60 minutes without a request -->
             <session-config timeout="60"/>
+
+            <!-- Notification Message Endpoint -->
+            <endpoint path="/notws" class="org.moqui.impl.webapp.NotificationEndpoint" timeout="3600000" enabled="true"/>
         </webapp>
     </webapp-list>
 
@@ -201,7 +161,6 @@
 
     <transaction-facade use-transaction-cache="true">
         <!-- Use this for the internal transaction manager (not through JNDI) -->
-        <!-- <transaction-internal class="org.moqui.impl.context.TransactionInternalAtomikos"/> -->
         <transaction-internal class="org.moqui.impl.context.TransactionInternalBitronix"/>
 
         <!-- If this is not present the default JNDI server will be used -->
@@ -232,27 +191,19 @@
         <resource-reference scheme="dbresource" class="org.moqui.impl.context.reference.DbResourceReference"/>
 
         <!-- renderer class needs to implement the org.moqui.context.TemplateRenderer interface -->
-        <template-renderer extension=".ftl" class="org.moqui.impl.context.renderer.FtlTemplateRenderer"/>
-        <template-renderer extension=".html.ftl" class="org.moqui.impl.context.renderer.FtlTemplateRenderer"/>
-        <template-renderer extension=".gstring" class="org.moqui.impl.context.renderer.GStringTemplateRenderer"/>
-        <template-renderer extension=".html.gstring" class="org.moqui.impl.context.renderer.GStringTemplateRenderer"/>
+        <template-renderer extension="ftl" class="org.moqui.impl.context.renderer.FtlTemplateRenderer"/>
+        <template-renderer extension="html.ftl" class="org.moqui.impl.context.renderer.FtlTemplateRenderer"/>
+        <template-renderer extension="gstring" class="org.moqui.impl.context.renderer.GStringTemplateRenderer"/>
+        <template-renderer extension="html.gstring" class="org.moqui.impl.context.renderer.GStringTemplateRenderer"/>
 
-        <template-renderer extension=".cwiki" class="org.moqui.impl.context.renderer.WikiTemplateRenderer"/>
-        <template-renderer extension=".cwiki.ftl" class="org.moqui.impl.context.renderer.FtlCwikiTemplateRenderer"/>
-        <template-renderer extension=".confluence" class="org.moqui.impl.context.renderer.WikiTemplateRenderer"/>
-        <template-renderer extension=".mediawiki" class="org.moqui.impl.context.renderer.WikiTemplateRenderer"/>
-        <template-renderer extension=".textile" class="org.moqui.impl.context.renderer.WikiTemplateRenderer"/>
-        <template-renderer extension=".tracwiki" class="org.moqui.impl.context.renderer.WikiTemplateRenderer"/>
-        <template-renderer extension=".twiki" class="org.moqui.impl.context.renderer.WikiTemplateRenderer"/>
-
-        <template-renderer extension=".md" class="org.moqui.impl.context.renderer.MarkdownTemplateRenderer"/>
-        <template-renderer extension=".markdown" class="org.moqui.impl.context.renderer.MarkdownTemplateRenderer"/>
-        <template-renderer extension=".md.ftl" class="org.moqui.impl.context.renderer.FtlMarkdownTemplateRenderer"/>
-        <template-renderer extension=".markdown.ftl" class="org.moqui.impl.context.renderer.FtlMarkdownTemplateRenderer"/>
+        <template-renderer extension="md" class="org.moqui.impl.context.renderer.MarkdownTemplateRenderer"/>
+        <template-renderer extension="markdown" class="org.moqui.impl.context.renderer.MarkdownTemplateRenderer"/>
+        <template-renderer extension="md.ftl" class="org.moqui.impl.context.renderer.FtlMarkdownTemplateRenderer"/>
+        <template-renderer extension="markdown.ftl" class="org.moqui.impl.context.renderer.FtlMarkdownTemplateRenderer"/>
 
         <!-- a renderer for .html isn't necessary because the default is to write the text as-is, however this is useful
             so that the extension becomes a default extension and doesn't have to be in the URL -->
-        <template-renderer extension=".html" class="org.moqui.impl.context.renderer.NoTemplateRenderer"/>
+        <template-renderer extension="html" class="org.moqui.impl.context.renderer.NoTemplateRenderer"/>
 
         <!-- this is just an example, always use the ScriptRunner interface instead of javax.script because javax.script
             does not support compiling class scripts and running methods within the class, but Groovy does
@@ -280,7 +231,7 @@
                             macro-template-location="template/screen-macro/DefaultScreenMacros.xsl-fo.ftl"/>
     </screen-facade>
 
-    <service-facade distributed-factory="HazelcastExecutor">
+    <service-facade distributed-factory="" scheduled-job-check-time="60">
         <!-- NOTE: scheduled service jobs are managed using Quartz Scheduler, see quartz configuration for more details -->
 
         <service-location name="main-xml" location="http://localhost:8080/rpc/xml"/>
@@ -291,9 +242,8 @@
         <service-type name="entity-auto" runner-class="org.moqui.impl.service.runner.EntityAutoServiceRunner"/>
         <service-type name="script" runner-class="org.moqui.impl.service.runner.ScriptServiceRunner"/>
         <service-type name="java" runner-class="org.moqui.impl.service.runner.JavaServiceRunner"/>
-        <service-type name="remote-xml-rpc" runner-class="org.moqui.impl.service.runner.RemoteXmlrpcServiceRunner"/>
         <service-type name="remote-json-rpc" runner-class="org.moqui.impl.service.runner.RemoteJsonRpcServiceRunner"/>
-        <service-type name="camel" runner-class="org.moqui.impl.service.runner.CamelServiceRunner"/>
+        <!-- not commonly used, see class: <service-type name="remote-xml-rpc" runner-class="org.moqui.impl.service.runner.RemoteXmlrpcServiceRunner"/> -->
 
         <!-- These are not needed for running classpath services, are for service reference (known services) -->
         <service-file location="classpath://service/org/moqui/EmailServices.xml"/>
@@ -303,20 +253,23 @@
         <service-file location="classpath://service/org/moqui/impl/EmailServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/EntityServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/EntitySyncServices.xml"/>
+        <service-file location="classpath://service/org/moqui/impl/InstanceServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/PrintServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/ScreenServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/ServerServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/ServiceServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/SystemMessageServices.xml"/>
-        <service-file location="classpath://service/org/moqui/impl/TenantServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/UserServices.xml"/>
         <service-file location="classpath://service/org/moqui/impl/WikiServices.xml"/>
+        <service-file location="classpath://service/org/moqui/search/SearchServices.xml"/>
     </service-facade>
 
     <entity-facade default-group-name="transactional" entity-eca-enabled="true" sequenced-id-prefix=""
-            distributed-cache-invalidate="false" dci-topic-factory="HazelcastDciTopic"
+            distributed-cache-invalidate="false" dci-topic-factory="" query-stats="false"
             crypt-salt="SkcorIuqom" crypt-iter="10" crypt-algo="PBEWithMD5AndDES" crypt-pass="">
         <!-- NOTE: no crypt-pass attribute by default, must specify in your conf file! -->
+        <!-- The entity-facade.@default-group-name=transactional, so if other entity groups do not have a data source
+            the transactional group's datasource will be used. -->
 
         <!-- If this is not present the default JNDI server will be used:
         <server-jndi context-provider-url="rmi://127.0.0.1:1099"
@@ -326,20 +279,6 @@
          -->
 
         <!--
-            The entity-facade.@default-group-name=transactional, so if other entity groups do not have a data source
-            the transactional group's datasource will be used.
-
-            Standard group names include:
-            - transactional: transactional business entities that need atomic operations, immediate consistency, etc;
-              typically never cached; includes things like work efforts, orders, shipments, inventory/assets, invoices,
-              accounting and financial transactions
-            - nontransactional: non-transactional business entities; eventual consistency is adequate; may be cached;
-              non-transactional does not mean transactions are not used, but that strict consistency is not important;
-              includes things like parties, facilities, products, history/tracking data (master data, meta-data)
-            - configuration: framework and application configuration data; eventual consistency is okay; typically cached
-            - analytical: analytical entities with data typically derived from transactional data
-        -->
-        <!--
             The configurations below will use the XADataSource directly to connect, which is required for proper
             transaction handling with multiple data sources.
 
@@ -347,20 +286,20 @@
             xa-properties element. If the xa-properties element is present the normal JDBC parameters will be ignored.
 
             To use a DataSource from JNDI use something the jndi-jdbc element under the datasource element:
-                <jndi-jdbc jndi-name="java:/MoquiDEFAULTDataSource"/>
+                <jndi-jdbc jndi-name="java:/MoquiDataSource"/>
+
+            NOTE: for production usage there is one connection pool per datasource so use as few datasources as possible.
+
+            The main datasource should have a max size large enough for all servlet container threads plus a few for
+            the worker pool (see tools.@worker-pool-max). Note that Bitronix has a 30 second timeout waiting for a
+            connection from the pool, and currently connections are NOT shared between transactions (only released when
+            a tx is closed).
+
+            Good numbers for a decent sized server are 100 servlet container (Jetty) threads, 16 worker threads, plus a
+            few extra so 120 connections in the main pool.
         -->
-
-        <!-- NOTE: With this embedded H2 setup you can connect remotely using "jdbc:h2:tcp://localhost:9092/MoquiDEFAULT" -->
-        <datasource group-name="transactional" database-conf-name="h2" schema-name=""
-                start-server-args="-tcpPort 9092 -ifExists -baseDir ${moqui_runtime}/db/h2">
-            <inline-jdbc><xa-properties url="${ds_transactional_url}" user="${ds_transactional_user}"
-                    password="${ds_transactional_password}"/></inline-jdbc>
-        </datasource>
-
-        <!-- The tenantcommon group can also in the same DB, but MUST have a separate definition for multi-tenant to work -->
-        <datasource group-name="tenantcommon" database-conf-name="h2" schema-name="">
-            <inline-jdbc><xa-properties url="${ds_transactional_url}" user="${ds_transactional_user}"
-                    password="${ds_transactional_password}"/></inline-jdbc>
+        <datasource group-name="transactional" database-conf-name="${entity_ds_db_conf}" schema-name="${entity_ds_schema}">
+            <!-- by default no inline-jdbc or jndi-jdbc elements, use default from database conf -->
         </datasource>
 
         <!-- The nontransactional group is in the transactional db by default. To use OrientDB use the datasource below.
@@ -372,72 +311,6 @@
         <datasource group-name="nontransactional" startup-add-missing="true"
                 object-factory="org.moqui.impl.entity.orientdb.OrientDatasourceFactory">
             <inline-other uri="plocal:${ORIENTDB_HOME}/databases/MoquiNoSql" username="admin" password="admin"/>
-        </datasource>
-        -->
-
-        <!--
-        ===== Database Configuration Examples =====
-
-        * DB2:
-        <datasource group-name="transactional" database-conf-name="db2" schema-name="" startup-add-missing="true" runtime-add-missing="false">
-            <inline-jdbc><xa-properties user="moqui" password="moqui" serverName="localhost" portNumber="5021"
-                    driverType="4" databaseName="MoquiDEFAULT"/></inline-jdbc>
-        </datasource>
-        <datasource group-name="transactional" database-conf-name="db2" schema-name="" startup-add-missing="true" runtime-add-missing="false">
-            <inline-jdbc jdbc-uri="jdbc:db2://localhost:5021/MoquiDEFAULT" jdbc-username="moqui" jdbc-password="moqui"/>
-        </datasource>
-
-        * Derby:
-        <datasource group-name="transactional" database-conf-name="derby" schema-name="MOQUI">
-            <inline-jdbc><xa-properties databaseName="${moqui_runtime}/db/derby/MoquiDEFAULT" createDatabase="create"/></inline-jdbc>
-        </datasource>
-        <datasource group-name="transactional" database-conf-name="derby" schema-name="MOQUI">
-            <inline-jdbc jdbc-uri="jdbc:derby:MoquiDEFAULT;create=true" jdbc-username="moqui" jdbc-password="moqui"/>
-        </datasource>
-
-        * H2 Database:
-        <datasource group-name="transactional" database-conf-name="h2" schema-name="">
-            <inline-jdbc><xa-properties url="jdbc:h2:${moqui_runtime}/db/h2/MoquiDEFAULT" user="sa" password=""/></inline-jdbc>
-        </datasource>
-        <datasource group-name="transactional" database-conf-name="h2" schema-name="">
-            <inline-jdbc jdbc-uri="jdbc:h2:${moqui_runtime}/db/h2/MoquiDEFAULT" jdbc-username="sa" jdbc-password="sa"/>
-        </datasource>
-
-        * MS SQL Server:
-        <datasource group-name="transactional" database-conf-name="mssql" schema-name="">
-            <inline-jdbc><xa-properties user="moqui" password="moqui" serverName="localhost" portNumber="1433"
-                    databaseName="MoquiDEFAULT"/></inline-jdbc>
-        </datasource>
-        <datasource group-name="transactional" database-conf-name="mssql" schema-name="">
-            <inline-jdbc jdbc-uri="jdbc:sqlserver://localhost:1433;databaseName=MoquiDEFAULT" jdbc-username="moqui" jdbc-password="moqui"/>
-        </datasource>
-
-        * MySQL (similar for Percona Server, MariaDB):
-        <datasource group-name="transactional" database-conf-name="mysql" schema-name="">
-            <inline-jdbc><xa-properties user="moqui" password="moqui" pinGlobalTxToPhysicalConnection="true"
-                    serverName="127.0.0.1" port="3306" databaseName="MoquiDEFAULT" autoReconnectForPools="true"
-                    useUnicode="true" encoding="UTF-8"/></inline-jdbc>
-        </datasource>
-        <datasource group-name="transactional" database-conf-name="mysql" schema-name="">
-            <inline-jdbc jdbc-uri="jdbc:mysql://127.0.0.1:3306/MoquiDEFAULT?autoReconnect=true&amp;useUnicode=true&amp;characterEncoding=UTF-8"
-                    jdbc-username="moqui" jdbc-password="moqui"/>
-        </datasource>
-
-        * Oracle:
-        <datasource group-name="transactional" database-conf-name="oracle" schema-name="MOQUI">
-            <inline-jdbc><xa-properties user="moqui" password="moqui" URL="jdbc:oracle:thin:@127.0.0.1:1521:MoquiDEFAULT"/></inline-jdbc>
-        </datasource>
-        <datasource group-name="transactional" database-conf-name="oracle" schema-name="MOQUI">
-            <inline-jdbc jdbc-uri="jdbc:oracle:thin:@127.0.0.1:1521:MoquiDEFAULT" jdbc-username="moqui" jdbc-password="moqui"/>
-        </datasource>
-
-        * PostgreSQL:
-        <datasource group-name="transactional" database-conf-name="postgres" schema-name="public" startup-add-missing="true" runtime-add-missing="false">
-            <inline-jdbc><xa-properties user="moqui" password="moqui" serverName="localhost" portNumber="5432"
-                    databaseName="MoquiDEFAULT"/></inline-jdbc>
-        </datasource>
-        <datasource group-name="transactional" database-conf-name="postgres" schema-name="public" startup-add-missing="true" runtime-add-missing="false">
-            <inline-jdbc jdbc-uri="jdbc:postgresql://127.0.0.1/MoquiDEFAULT" jdbc-username="moqui" jdbc-password="moqui"/>
         </datasource>
         -->
 
@@ -453,7 +326,6 @@
         <load-entity location="classpath://entity/SecurityEntities.xml"/>
         <load-entity location="classpath://entity/ServerEntities.xml"/>
         <load-entity location="classpath://entity/ServiceEntities.xml"/>
-        <load-entity location="classpath://entity/TenantEntities.xml"/>
         <load-entity location="classpath://entity/TestEntities.xml"/>
         <!-- in framework/data -->
         <load-data location="classpath://data/CommonL10nData.xml"/>
@@ -462,7 +334,6 @@
         <load-data location="classpath://data/GeoCountryData.xml"/>
         <load-data location="classpath://data/SecurityTypeData.xml"/>
         <load-data location="classpath://data/ServiceTypeData.xml"/>
-        <load-data location="classpath://data/TenantDefaultData.xml"/>
         <load-data location="classpath://data/UnitData.xml"/>
     </entity-facade>
     <database-list>
@@ -492,40 +363,84 @@
 
         <dictionary-type type="binary-very-long" java-type="java.sql.Blob" default-sql-type="BLOB"/>
 
-        <database name="db2" join-style="ansi" offset-style="limit" default-isolation-level="ReadCommitted"
-                  use-schema-for-all="true" use-indexes-unique="false"
-                  default-test-query="SELECT 1 FROM SYSIBM.SYSDUMMY1"
-                  default-jdbc-driver="com.ibm.db2.jcc.DB2Driver"
-                  default-xa-ds-class="com.ibm.db2.jcc.DB2XADataSource">
+        <!--
+        * DB2:
+        * to support LIMIT and OFFSET: "db2set DB2_COMPATIBILITY_VECTOR=MYS" (and if already running: db2stop then db2start)
+        * default page size of 4k not adequate, use something like: "create database moqui pagesize 32 k"
+        * the database name in the example is 'moqui', note that in DB2 database names are limits to 8 bytes
+
+        <datasource group-name="transactional" database-conf-name="db2" schema-name="DB2INST1" startup-add-missing="true" runtime-add-missing="false">
+            <inline-jdbc><xa-properties user="db2inst1" password="db2inst1" serverName="localhost" portNumber="50000"
+                    driverType="4" databaseName="moqui"/></inline-jdbc>
+        </datasource>
+        <datasource group-name="transactional" database-conf-name="db2" schema-name="" startup-add-missing="true" runtime-add-missing="false">
+            <inline-jdbc jdbc-uri="jdbc:db2://localhost:50000/moqui" jdbc-username="moqui" jdbc-password="moqui"/>
+        </datasource>
+        -->
+        <database name="db2" join-style="ansi" offset-style="limit"
+                default-isolation-level="ReadCommitted" for-update="FOR UPDATE WITH RS"
+                use-schema-for-all="true" use-indexes-unique="false" use-pk-constraint-names="false" fk-style="name_fk"
+                default-test-query="SELECT 1 FROM SYSIBM.SYSDUMMY1"
+                default-jdbc-driver="com.ibm.db2.jcc.DB2Driver"
+                default-xa-ds-class="com.ibm.db2.jcc.DB2XADataSource"
+                default-startup-add-missing="true" default-runtime-add-missing="false">
             <database-type type="number-integer" sql-type="DECIMAL(20,0)"/>
             <database-type type="number-decimal" sql-type="DECIMAL(26,6)"/>
-            <database-type type="number-float" sql-type="DECIMAL(32,12)"/>
-
+            <database-type type="number-float" sql-type="DECIMAL(30,12)"/>
             <database-type type="currency-amount" sql-type="DECIMAL(22,2)"/>
             <database-type type="currency-precise" sql-type="DECIMAL(23,3)"/>
+
+            <inline-jdbc><xa-properties driverType="4" serverName="${entity_ds_host}" portNumber="${entity_ds_port?:'50000'}"
+                    databaseName="${entity_ds_database}" user="${entity_ds_user}" password="${entity_ds_password}"/></inline-jdbc>
         </database>
-        <database name="db2i" join-style="ansi" offset-style="cursor" default-isolation-level="ReadCommitted"
-                  use-schema-for-all="true" use-indexes-unique-where-not-null="true"
-                  default-test-query="SELECT 1 FROM SYSIBM.SYSDUMMY1"
-                  default-jdbc-driver="com.ibm.as400.access.AS400JDBCDriver"
-                  default-xa-ds-class="com.ibm.as400.access.AS400JDBCXADataSource">
+        <database name="db2i" join-style="ansi" offset-style="limit"
+                default-isolation-level="ReadCommitted"  for-update="FOR UPDATE WITH RS"
+                use-schema-for-all="true" use-indexes-unique-where-not-null="true"
+                default-test-query="SELECT 1 FROM SYSIBM.SYSDUMMY1"
+                default-jdbc-driver="com.ibm.as400.access.AS400JDBCDriver"
+                default-xa-ds-class="com.ibm.as400.access.AS400JDBCXADataSource">
             <database-type type="number-integer" sql-type="DECIMAL(20,0)"/>
             <database-type type="number-decimal" sql-type="DECIMAL(26,6)"/>
-            <database-type type="number-float" sql-type="DECIMAL(32,12)"/>
-
+            <database-type type="number-float" sql-type="DECIMAL(30,12)"/>
             <database-type type="currency-amount" sql-type="DECIMAL(22,2)"/>
             <database-type type="currency-precise" sql-type="DECIMAL(23,3)"/>
+
+            <inline-jdbc><xa-properties driverType="4" serverName="${entity_ds_host}" portNumber="${entity_ds_port?:'50000'}"
+                    databaseName="${entity_ds_database}" user="${entity_ds_user}" password="${entity_ds_password}"/></inline-jdbc>
         </database>
+        <!--
+        * Derby:
+        <datasource group-name="transactional" database-conf-name="derby" schema-name="MOQUI">
+            <inline-jdbc><xa-properties databaseName="${moqui_runtime}/db/derby/moqui" createDatabase="create"/></inline-jdbc>
+        </datasource>
+        <datasource group-name="transactional" database-conf-name="derby" schema-name="MOQUI">
+            <inline-jdbc jdbc-uri="jdbc:derby:moqui;create=true" jdbc-username="moqui" jdbc-password="moqui"/>
+        </datasource>
+        -->
         <database name="derby"
                 use-pk-constraint-names="false" use-indexes-unique="false" default-isolation-level="ReadCommitted"
                 default-jdbc-driver="org.apache.derby.jdbc.EmbeddedDriver"
                 default-xa-ds-class="org.apache.derby.jdbc.EmbeddedXADataSource">
             <!-- default-test-query="???" maybe like SELECT 1 FROM SEQUENCE_VALUE_ITEM WHERE 1=0 -->
+            <inline-jdbc><xa-properties databaseName="${moqui_runtime}/db/derby/${entity_ds_database}" createDatabase="create"/></inline-jdbc>
         </database>
-        <database name="h2"
-                use-pk-constraint-names="false" use-indexes-unique="true" default-isolation-level="ReadCommitted"
-                default-jdbc-driver="org.h2.Driver" default-xa-ds-class="org.h2.jdbcx.JdbcDataSource">
+        <!--
+        * H2 Database:
+        * NOTE: With this embedded H2 setup you can connect remotely using "jdbc:h2:tcp://localhost:9092/moqui"
+
+        <datasource group-name="transactional" database-conf-name="h2" schema-name="">
+            <inline-jdbc><xa-properties url="jdbc:h2:${moqui_runtime}/db/h2/moqui;lock_timeout=30000" user="sa" password=""/></inline-jdbc>
+        </datasource>
+        <datasource group-name="transactional" database-conf-name="h2" schema-name="">
+            <inline-jdbc jdbc-uri="jdbc:h2:${moqui_runtime}/db/h2/moqui;lock_timeout=30000" jdbc-username="sa" jdbc-password="sa"/>
+        </datasource>
+        -->
+        <database name="h2" use-pk-constraint-names="false" use-indexes-unique="true" default-isolation-level="ReadCommitted"
+                default-jdbc-driver="org.h2.Driver" default-xa-ds-class="org.h2.jdbcx.JdbcDataSource"
+                default-start-server-args="-tcpPort 9092 -ifExists -baseDir ${moqui_runtime}/db/h2">
+            <inline-jdbc><xa-properties url="${entity_ds_url}" user="${entity_ds_user}" password="${entity_ds_password}"/></inline-jdbc>
         </database>
+        <!-- TODO: add configuration examples -->
         <database name="hsql" use-fk-initially-deferred="false" join-style="ansi-no-parenthesis"
                 default-isolation-level="ReadUncommitted" default-jdbc-driver="org.hsqldb.jdbcDriver"
                 default-test-query="SELECT 1 FROM SEQUENCE_VALUE_ITEM WHERE 1=0">
@@ -547,6 +462,16 @@
 
             <database-type type="binary-very-long" sql-type="OBJECT" sql-type-alias="OTHER"/>
         </database>
+        <!--
+        * MS SQL Server:
+        <datasource group-name="transactional" database-conf-name="mssql" schema-name="">
+            <inline-jdbc><xa-properties user="moqui" password="moqui" serverName="localhost" portNumber="1433"
+                    databaseName="moqui"/></inline-jdbc>
+        </datasource>
+        <datasource group-name="transactional" database-conf-name="mssql" schema-name="">
+            <inline-jdbc jdbc-uri="jdbc:sqlserver://localhost:1433;databaseName=moqui" jdbc-username="moqui" jdbc-password="moqui"/>
+        </datasource>
+        -->
         <database name="mssql" join-style="ansi" default-isolation-level="ReadCommitted" offset-style="cursor"
                 default-test-query="SELECT 1" default-jdbc-driver="com.microsoft.sqlserver.jdbc.SQLServerDriver"
                 default-xa-ds-class="com.microsoft.sqlserver.jdbc.SQLServerXADataSource">
@@ -572,14 +497,37 @@
             <database-type type="text-very-long" sql-type="TEXT"/>
 
             <database-type type="binary-very-long" sql-type="IMAGE"/>
+
+            <inline-jdbc><xa-properties serverName="${entity_ds_host}" portNumber="${entity_ds_port?:'1433'}"
+                    databaseName="${entity_ds_database}" user="${entity_ds_user}" password="${entity_ds_password}"/></inline-jdbc>
         </database>
+        <!--
+        * MySQL (similar for Percona Server, MariaDB, AWS Aurora):
+        <datasource group-name="transactional" database-conf-name="mysql" schema-name="">
+            <inline-jdbc><xa-properties user="moqui" password="moqui" pinGlobalTxToPhysicalConnection="true"
+                    serverName="127.0.0.1" port="3306" databaseName="moqui" autoReconnectForPools="true"
+                    useUnicode="true" encoding="UTF-8"/></inline-jdbc>
+        </datasource>
+        <datasource group-name="transactional" database-conf-name="mysql" schema-name="">
+            <inline-jdbc jdbc-uri="jdbc:mysql://127.0.0.1:3306/moqui?autoReconnect=true&amp;useUnicode=true&amp;characterEncoding=UTF-8"
+                    jdbc-username="moqui" jdbc-password="moqui"/>
+        </datasource>
+        -->
         <database name="mysql" join-style="ansi-no-parenthesis" offset-style="limit"
                 table-engine="InnoDB" character-set="utf8" collate="utf8_general_ci"
                 default-isolation-level="ReadCommitted" use-tm-join="true"
                 default-jdbc-driver="com.mysql.jdbc.Driver"
                 default-xa-ds-class="com.mysql.jdbc.jdbc2.optional.MysqlXADataSource"
                 default-test-query="SELECT 1">
+            <!--
+                NOTE: to support 4 byte UTF-8 characters use 'utf8mb4' for character-set, and a corresponding collate such as
+                'utf8mb4_col'. Use this character set and collate when creating your database/schema in MySQL before running Moqui,
+                and if set here it will be set on tables that are created as well. For existing databases already set to plain utf8
+                you'll need to run SQL statements on MySQL to change the character set and collate for each table.
+            -->
+
             <!-- use DATETIME instead of TIMESTAMP so can be null and gets no default value; issue with newer MySQL versions -->
+            <!-- NOTE: DATETIME(3) is supported, and needed, on MySQL 5.7; for earlier versions removed the '(3)' as it has millisecond precision by default -->
             <database-type type="date-time" sql-type="DATETIME(3)"/>
 
             <database-type type="number-integer" sql-type="DECIMAL(20,0)"/>
@@ -592,7 +540,20 @@
             <database-type type="text-very-long" sql-type="LONGTEXT"/>
 
             <database-type type="binary-very-long" sql-type="LONGBLOB"/>
+
+            <inline-jdbc><xa-properties pinGlobalTxToPhysicalConnection="true" autoReconnectForPools="true" useUnicode="true" encoding="UTF-8"
+                    serverName="${entity_ds_host}" port="${entity_ds_port?:'3306'}" databaseName="${entity_ds_database}"
+                    user="${entity_ds_user}" password="${entity_ds_password}"/></inline-jdbc>
         </database>
+        <!--
+        * Oracle:
+        <datasource group-name="transactional" database-conf-name="oracle" schema-name="MOQUI">
+            <inline-jdbc><xa-properties user="moqui" password="moqui" URL="jdbc:oracle:thin:@127.0.0.1:1521:moqui"/></inline-jdbc>
+        </datasource>
+        <datasource group-name="transactional" database-conf-name="oracle" schema-name="MOQUI">
+            <inline-jdbc jdbc-uri="jdbc:oracle:thin:@127.0.0.1:1521:moqui" jdbc-username="moqui" jdbc-password="moqui"/>
+        </datasource>
+        -->
         <database name="oracle" join-style="ansi" default-isolation-level="ReadCommitted"
                   default-test-query="SELECT 1 FROM DUAL" default-jdbc-driver="oracle.jdbc.driver.OracleDriver"
                   default-xa-ds-class="oracle.jdbc.xa.client.OracleXADataSource">
@@ -609,15 +570,31 @@
             <database-type type="text-short" sql-type="VARCHAR2(10)"/>
             <database-type type="text-medium" sql-type="VARCHAR2(255)"/>
             <database-type type="text-long" sql-type="VARCHAR2(4000)"/>
+
+            <inline-jdbc><xa-properties user="${entity_ds_user}" password="${entity_ds_password}"
+                    URL="jdbc:oracle:thin:@${entity_ds_host}:${entity_ds_port?:'1521'}:${entity_ds_database}"/></inline-jdbc>
         </database>
+
         <!-- for future reference (OrientDB with JDBC driver): <database name="orientdb"
                 use-pk-constraint-names="false" default-isolation-level="ReadCommitted"
                 default-jdbc-driver="com.orientechnologies.orient.jdbc.OrientJdbcDriver"
                 default-xa-ds-class="">
         </database> -->
+
+        <!--
+        * PostgreSQL:
+        <datasource group-name="transactional" database-conf-name="postgres" schema-name="public" startup-add-missing="true" runtime-add-missing="false">
+            <inline-jdbc><xa-properties user="moqui" password="moqui" serverName="localhost" portNumber="5432"
+                    databaseName="moqui"/></inline-jdbc>
+        </datasource>
+        <datasource group-name="transactional" database-conf-name="postgres" schema-name="public" startup-add-missing="true" runtime-add-missing="false">
+            <inline-jdbc jdbc-uri="jdbc:postgresql://127.0.0.1/moqui" jdbc-username="moqui" jdbc-password="moqui"/>
+        </datasource>
+        -->
         <database name="postgres" use-fk-initially-deferred="false" join-style="ansi" result-fetch-size="50"
                   default-isolation-level="ReadCommitted" use-tm-join="true" default-test-query="SELECT 1"
-                  default-jdbc-driver="org.postgresql.Driver" default-xa-ds-class="org.postgresql.xa.PGXADataSource">
+                  default-jdbc-driver="org.postgresql.Driver" default-xa-ds-class="org.postgresql.xa.PGXADataSource"
+                  default-startup-add-missing="true" default-runtime-add-missing="false">
             <!-- NOTE: when Postgres JDBC driver updated can set use-tm-join="true" -->
             <database-type type="number-float" sql-type="FLOAT8"/>
 
@@ -626,8 +603,12 @@
             <database-type type="text-very-long" sql-type="TEXT"/>
 
             <database-type type="binary-very-long" sql-type="BYTEA"/>
+
+            <inline-jdbc><xa-properties serverName="${entity_ds_host}" portNumber="${entity_ds_port?:'5432'}"
+                    databaseName="${entity_ds_database}" user="${entity_ds_user}" password="${entity_ds_password}"/></inline-jdbc>
         </database>
     </database-list>
+
     <repository-list>
         <!-- No JCR repo by default, but here are some examples: -->
         <!-- requires 'org.apache.jackrabbit:jackrabbit-jcr-rmi' in the classpath:
@@ -637,11 +618,12 @@
         <repository name="main" workspace="default" username="admin" password="admin">
             <init-param name="org.apache.jackrabbit.spi2davex.uri" value="http://localhost:8081/server"/></repository> -->
     </repository-list>
+
     <component-list>
         <component-dir location="base-component"/>
         <component-dir location="mantle"/>
-        <component-dir location="component-lib"/>
         <component-dir location="component"/>
+        <component-dir location="ecomponent"/>
         <!-- Here are some examples of explicitly loading the example component in different ways: -->
         <!-- <component name="example" location="component/example"/> -->
         <!-- <component name="example" location="content://main/component/example"/> -->

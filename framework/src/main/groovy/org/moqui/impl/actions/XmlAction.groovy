@@ -61,12 +61,13 @@ class XmlAction {
 
         if (isDebugEnabled) logger.debug("Running groovy script: \n${writeGroovyWithLines()}\n")
 
-        Script script = InvokerHelper.createScript(curClass, eci.getContextBinding())
+        Script script = InvokerHelper.createScript(curClass, eci.contextBindingInternal)
         try {
             Object result = script.run()
             return result
         } catch (Throwable t) {
-            logger.error("Error running groovy script (${t.toString()}): \n${writeGroovyWithLines()}\n")
+            // TODO: change this back to not logging full stack trace, only needed when lots of threads are running to pin down error
+            logger.error("Error running groovy script (${t.toString()}): \n${writeGroovyWithLines()}\n", t)
             throw t
         }
     }
@@ -89,11 +90,10 @@ class XmlAction {
     protected synchronized Class makeGroovyClass() {
         if (groovyClassInternal != null) return groovyClassInternal
 
-        getGroovyString()
-        // if (logger.isTraceEnabled()) logger.trace("Xml Action [${location}] groovyString: ${groovyString}")
+        String curGroovy = getGroovyString()
+        // if (logger.isTraceEnabled()) logger.trace("Xml Action [${location}] groovyString: ${curGroovy}")
         try {
-            groovyClassInternal = new GroovyClassLoader(Thread.currentThread().getContextClassLoader())
-                    .parseClass(groovyString, StupidUtilities.cleanStringForJavaName(location))
+            groovyClassInternal = ecfi.getGroovyClassLoader().parseClass(curGroovy, StupidUtilities.cleanStringForJavaName(location))
         } catch (Throwable t) {
             groovyClassInternal = null
             logger.error("Error parsing groovy String at [${location}]:\n${writeGroovyWithLines()}\n")

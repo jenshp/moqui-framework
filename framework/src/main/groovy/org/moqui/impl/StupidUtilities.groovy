@@ -16,11 +16,13 @@ package org.moqui.impl
 import groovy.transform.CompileStatic
 import groovy.transform.TypeChecked
 import groovy.transform.TypeCheckingMode
-import org.joda.time.DurationFieldType
 
 import java.nio.charset.Charset
+import java.security.SecureRandom
 import java.sql.Time
 import java.sql.Timestamp
+import java.time.temporal.ChronoUnit
+import java.time.temporal.TemporalUnit
 import java.util.regex.Pattern
 
 import org.w3c.dom.Element
@@ -135,11 +137,11 @@ class StupidUtilities {
     }
 
     static void filterMapList(List<Map> theList, Map<String, Object> fieldValues) {
-        if (!theList || !fieldValues) return
+        if (theList == null || theList.size() == 0 || fieldValues == null || fieldValues.size() == 0) return
         Iterator<Map> theIterator = theList.iterator()
         while (theIterator.hasNext()) {
-            Map curMap = theIterator.next()
-            for (Map.Entry entry in fieldValues.entrySet()) {
+            Map curMap = (Map) theIterator.next()
+            for (Map.Entry<String, Object> entry in fieldValues.entrySet()) {
                 if (curMap.get(entry.key) != entry.value) { theIterator.remove(); break }
             }
         }
@@ -174,7 +176,45 @@ class StupidUtilities {
         if (theList && fieldNames) Collections.sort(theList, new StupidJavaUtilities.MapOrderByComparator(fieldNameArray))
     }
 
-    /** NOTE: in Groovy this method is not necessary, just use something like: theList.field
+    /** For a list of Map find the entry that best matches the fieldsByPriority Ordered Map; null field values in a Map
+     * in mapList match against any value but do not contribute to maximal match score, otherwise value for each field
+     * in fieldsByPriority must match for it to be a candidate. */
+    static Map<String, Object> findMaximalMatch(List<Map<String, Object>> mapList, LinkedHashMap<String, Object> fieldsByPriority) {
+        int numFields = fieldsByPriority.size()
+        String[] fieldNames = new String[numFields]
+        int index = 0
+        for (String key in fieldsByPriority.keySet()) { fieldNames[index] = key; index++ }
+
+        int highScore = -1
+        Map<String, Object> highMap = (Map<String, Object>) null
+        for (Map<String, Object> curMap in mapList) {
+            int curScore = 0
+            boolean skipMap = false
+            for (int i = 0; i < numFields; i++) {
+                String curField = fieldNames[i]
+                // if curMap value is null skip field (null value in Map means allow any match value
+                Object curValue = curMap.get(curField)
+                if (curValue == null) continue
+                // if not equal skip Map
+                if (!curValue.equals(fieldsByPriority.get(curField))) {
+                    skipMap = true
+                    break
+                }
+                // add to score based on index (lower index higher score), also add numFields so more fields matched weights higher
+                curScore += (numFields - i) + numFields
+            }
+            if (skipMap) continue
+            // have a higher score?
+            if (curScore > highScore) {
+                highScore = curScore
+                highMap = curMap
+            }
+        }
+
+        return highMap
+    }
+
+    /* NOTE: in Groovy this method is not necessary, just use something like: theList.field
     static Set<Object> getFieldValuesFromMapList(List<Map> theList, String fieldName) {
         Set<Object> theSet = new HashSet<>()
         for (Map curMap in theList) if (curMap.get(fieldName)) theSet.add(curMap.get(fieldName))
@@ -326,6 +366,15 @@ class StupidUtilities {
             if (entry.getValue() == null) iterator.remove()
         }
         return theMap
+    }
+
+    static boolean mapMatchesFields(Map<String, Object> baseMap, Map<String, Object> compareMap) {
+        for (Map.Entry<String, Object> entry in compareMap.entrySet()) {
+            Object compareObj = compareMap.get(entry.getKey())
+            Object baseObj = baseMap.get(entry.getKey())
+            if (compareObj != baseObj) return false
+        }
+        return true
     }
 
     static Node deepCopyNode(Node original) { return deepCopyNode(original, null) }
@@ -527,15 +576,12 @@ class StupidUtilities {
     }
 
     static String getRandomString(int length) {
-        StringBuilder sb = new StringBuilder()
-        while (sb.length() <= length) {
-            int r = (int) Math.round(Math.random() * 93)
-            char c = (char) (r + 33).intValue()
-            // avoid certain characters
-            if ("\"'&<>?0\\".indexOf((int) c.charValue()) >= 0) continue
-            sb.append(c)
-        }
-        return sb.toString()
+        SecureRandom sr = new SecureRandom()
+        byte[] randomBytes = new byte[length]
+        sr.nextBytes(randomBytes)
+        String randomStr = Base64.getUrlEncoder().encodeToString(randomBytes)
+        if (randomStr.length() > length) randomStr = randomStr.substring(0, length)
+        return randomStr
     }
 
     public static class Incrementer {
@@ -557,16 +603,16 @@ class StupidUtilities {
             default: throw new IllegalArgumentException("No equivalent Calendar field found for UOM ID [${uomId}]"); break
         }
     }
-    static DurationFieldType getJodaFieldFromUomId(String uomId) {
+    static TemporalUnit getTemporalUnitFromUomId(String uomId) {
         switch (uomId) {
-            case "TF_ms": return DurationFieldType.millis()
-            case "TF_s": return DurationFieldType.seconds()
-            case "TF_min": return DurationFieldType.minutes()
-            case "TF_hr": return DurationFieldType.hours()
-            case "TF_day": return DurationFieldType.days()
-            case "TF_wk": return DurationFieldType.weeks()
-            case "TF_mon": return DurationFieldType.months()
-            case "TF_yr": return DurationFieldType.years()
+            case "TF_ms": return ChronoUnit.MILLIS
+            case "TF_s": return ChronoUnit.SECONDS
+            case "TF_min": return ChronoUnit.MINUTES
+            case "TF_hr": return ChronoUnit.HOURS
+            case "TF_day": return ChronoUnit.DAYS
+            case "TF_wk": return ChronoUnit.WEEKS
+            case "TF_mon": return ChronoUnit.MONTHS
+            case "TF_yr": return ChronoUnit.YEARS
             default: throw new IllegalArgumentException("No equivalent Calendar field found for UOM ID [${uomId}]"); break
         }
     }

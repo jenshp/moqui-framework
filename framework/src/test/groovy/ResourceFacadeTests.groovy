@@ -50,7 +50,7 @@ class ResourceFacadeTests extends Specification {
         "component://tools/screen/Tools.xml" | "file" | null | "Tools.xml" | "text/xml" | true | true | false
         "component://tools/screen/ToolsFoo.xml" | "file" | null | "ToolsFoo.xml" | "text/xml" | false | false | false
         "classpath://entity/BasicEntities.xml" | "file" | null | "BasicEntities.xml" | "text/xml" | true | true | false
-        "classpath://jta.properties" | "file" | null | "jta.properties" | "text/x-java-properties" | true | true | false
+        "classpath://bitronix-default-config.properties" | "file" | null | "bitronix-default-config.properties" | "text/x-java-properties" | true | true | false
         "classpath://shiro.ini" | "file" | null | "shiro.ini" | "text/plain" | true | true | false
         "template/screen-macro/ScreenHtmlMacros.ftl" | "file" | null | "ScreenHtmlMacros.ftl" | "text/x-freemarker" | true | true | false
         "template/screen-macro" | "file" | null | "screen-macro" | "application/octet-stream" | true | false | true
@@ -68,7 +68,7 @@ class ResourceFacadeTests extends Specification {
         "classpath://shiro.ini" | "org.moqui.impl.util.MoquiShiroRealm"
     }
 
-    // TODO: add tests for renderTemplateInCurrentContext and script
+    // TODO: add tests for template() and script()
 
     @Unroll
     def "groovy evaluate Condition (#expression)"() {
@@ -89,7 +89,7 @@ class ResourceFacadeTests extends Specification {
 
         where:
         expression | result
-        "ec.tenantId" | ec.tenantId
+        "ec.factory.moquiVersion" | ec.factory.moquiVersion
         "null" | null
         "undefinedVariable" | null
     }
@@ -101,7 +101,7 @@ class ResourceFacadeTests extends Specification {
 
         where:
         inputString | result
-        "Tenant: \${ec.tenantId}" | "Tenant: ${ec.tenantId}"
+        'Version: ${ec.factory.moquiVersion}' | "Version: ${ec.factory.moquiVersion}"
         "plain string" | "plain string"
     }
 }

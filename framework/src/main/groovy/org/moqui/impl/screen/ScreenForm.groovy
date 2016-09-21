@@ -15,7 +15,6 @@ package org.moqui.impl.screen
 
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
-import org.apache.commons.collections.map.ListOrderedMap
 import org.moqui.BaseException
 import org.moqui.context.ExecutionContext
 import org.moqui.entity.*
@@ -25,7 +24,7 @@ import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
 import org.moqui.impl.entity.*
-import org.moqui.impl.entity.EntityDefinition.RelationshipInfo
+import org.moqui.impl.entity.EntityJavaUtil.RelationshipInfo
 import org.moqui.impl.screen.ScreenDefinition.TransitionItem
 import org.moqui.impl.service.ServiceDefinition
 import org.moqui.impl.util.FtlNodeWrapper
@@ -34,6 +33,7 @@ import org.moqui.util.MNode
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
+import java.math.RoundingMode
 import java.sql.Timestamp
 
 @CompileStatic
@@ -53,6 +53,7 @@ class ScreenForm {
     protected String fullFormName
     protected boolean hasDbExtensions = false
     protected boolean isDynamic = false
+    protected String extendsScreenLocation = null
 
     protected XmlAction rowActions = null
 
@@ -69,7 +70,7 @@ class ScreenForm {
         // does this form have DbForm extensions?
         boolean alreadyDisabled = ecfi.getExecutionContext().getArtifactExecution().disableAuthz()
         try {
-            EntityList dbFormLookupList = this.ecfi.getEntityFacade().find("DbFormLookup")
+            EntityList dbFormLookupList = ecfi.entityFacade.find("DbFormLookup")
                     .condition("modifyXmlScreenForm", fullFormName).useCache(true).list()
             if (dbFormLookupList) hasDbExtensions = true
         } finally {
@@ -115,6 +116,7 @@ class ScreenForm {
                             this.sd.sectionByName.put(inclRefNode.attribute("name"), esd.getSection(inclRefNode.attribute("name")))
                     }
                 }
+                extendsScreenLocation = screenLocation
             } else {
                 ScreenForm esf = sd.getForm(extendsForm)
                 formNode = esf?.getOrCreateFormNode()
@@ -136,7 +138,7 @@ class ScreenForm {
                     addServiceFields(serviceDef, formSubNode.attribute("include")?:"in", formSubNode.attribute("field-type")?:"edit", newFormNode, ecfi)
                     continue
                 }
-                if (ecfi.getServiceFacade().isEntityAutoPattern(serviceName)) {
+                if (ecfi.serviceFacade.isEntityAutoPattern(serviceName)) {
                     EntityDefinition ed = ecfi.entityFacade.getEntityDefinition(ServiceDefinition.getNounFromName(serviceName))
                     if (ed != null) {
                         addEntityFields(ed, "all", formSubNode.attribute("field-type")?:"edit", ServiceDefinition.getVerbFromName(serviceName), newFormNode)
@@ -164,7 +166,7 @@ class ScreenForm {
             TransitionItem ti = this.sd.getTransitionItem(newFormNode.attribute("transition"), null)
             if (ti != null && ti.getSingleServiceName()) {
                 String singleServiceName = ti.getSingleServiceName()
-                ServiceDefinition sd = ecfi.getServiceFacade().getServiceDefinition(singleServiceName)
+                ServiceDefinition sd = ecfi.serviceFacade.getServiceDefinition(singleServiceName)
                 if (sd != null) {
                     ArrayList<String> inParamNames = sd.getInParameterNames()
                     for (MNode fieldNode in newFormNode.children("field")) {
@@ -174,10 +176,10 @@ class ScreenForm {
                             fieldNode.attributes.put("validate-service", singleServiceName)
                         }
                     }
-                } else if (ecfi.getServiceFacade().isEntityAutoPattern(singleServiceName)) {
+                } else if (ecfi.serviceFacade.isEntityAutoPattern(singleServiceName)) {
                     String entityName = ServiceDefinition.getNounFromName(singleServiceName)
-                    EntityDefinition ed = ecfi.getEntityFacade().getEntityDefinition(entityName)
-                    List<String> fieldNames = ed.getAllFieldNames(false)
+                    EntityDefinition ed = ecfi.entityFacade.getEntityDefinition(entityName)
+                    ArrayList<String> fieldNames = ed.getAllFieldNames()
                     for (MNode fieldNode in newFormNode.children("field")) {
                         // if the field matches an in-parameter name and does not already have a validate-entity, then set it
                         if (fieldNames.contains(fieldNode.attribute("name")) && !fieldNode.attribute("validate-entity")) {
@@ -223,7 +225,7 @@ class ScreenForm {
         try {
             // find DbForm records and merge them in as well
             String formName = sd.getLocation() + "#" + internalFormNode.attribute("name")
-            EntityList dbFormLookupList = this.ecfi.getEntityFacade().find("DbFormLookup")
+            EntityList dbFormLookupList = this.ecfi.entityFacade.find("DbFormLookup")
                     .condition("userGroupId", EntityCondition.IN, ecfi.getExecutionContext().getUser().getUserGroupIdSet())
                     .condition("modifyXmlScreenForm", formName)
                     .useCache(true).list()
@@ -241,17 +243,17 @@ class ScreenForm {
     }
 
     static MNode getDbFormNode(String formId, ExecutionContextFactoryImpl ecfi) {
-        MNode dbFormNode = (MNode) ecfi.getScreenFacade().dbFormNodeByIdCache.get(formId)
+        MNode dbFormNode = (MNode) ecfi.screenFacade.dbFormNodeByIdCache.get(formId)
 
         if (dbFormNode == null) {
 
-            boolean alreadyDisabled = ecfi.getExecutionContext().getArtifactExecution().disableAuthz()
+            boolean alreadyDisabled = ecfi.getEci().artifactExecutionFacade.disableAuthz()
             try {
-                EntityValue dbForm = ecfi.getEntityFacade().find("moqui.screen.form.DbForm").condition("formId", formId).useCache(true).one()
+                EntityValue dbForm = ecfi.entityFacade.find("moqui.screen.form.DbForm").condition("formId", formId).useCache(true).one()
                 if (dbForm == null) throw new BaseException("Could not find DbForm record with ID [${formId}]")
                 dbFormNode = new MNode((dbForm.isListForm == "Y" ? "form-list" : "form-single"), null)
 
-                EntityList dbFormFieldList = ecfi.getEntityFacade().find("moqui.screen.form.DbFormField").condition("formId", formId)
+                EntityList dbFormFieldList = ecfi.entityFacade.find("moqui.screen.form.DbFormField").condition("formId", formId)
                         .orderBy("layoutSequenceNum").useCache(true).list()
                 for (EntityValue dbFormField in dbFormFieldList) {
                     String fieldName = (String) dbFormField.fieldName
@@ -267,7 +269,7 @@ class ScreenForm {
                     String widgetName = fieldType.substring(6)
                     MNode widgetNode = subFieldNode.append(widgetName, null)
 
-                    EntityList dbFormFieldAttributeList = ecfi.getEntityFacade().find("moqui.screen.form.DbFormFieldAttribute")
+                    EntityList dbFormFieldAttributeList = ecfi.entityFacade.find("moqui.screen.form.DbFormFieldAttribute")
                             .condition([formId:formId, fieldName:fieldName] as Map<String, Object>).useCache(true).list()
                     for (EntityValue dbFormFieldAttribute in dbFormFieldAttributeList) {
                         String attributeName = dbFormFieldAttribute.attributeName
@@ -281,11 +283,11 @@ class ScreenForm {
                     }
 
                     // add option settings when applicable
-                    EntityList dbFormFieldOptionList = ecfi.getEntityFacade().find("moqui.screen.form.DbFormFieldOption")
+                    EntityList dbFormFieldOptionList = ecfi.entityFacade.find("moqui.screen.form.DbFormFieldOption")
                             .condition([formId:formId, fieldName:fieldName] as Map<String, Object>).useCache(true).list()
-                    EntityList dbFormFieldEntOptsList = ecfi.getEntityFacade().find("moqui.screen.form.DbFormFieldEntOpts")
+                    EntityList dbFormFieldEntOptsList = ecfi.entityFacade.find("moqui.screen.form.DbFormFieldEntOpts")
                             .condition([formId:formId, fieldName:fieldName] as Map<String, Object>).useCache(true).list()
-                    EntityList combinedOptionList = new EntityListImpl(ecfi.getEntityFacade())
+                    EntityList combinedOptionList = new EntityListImpl(ecfi.entityFacade)
                     combinedOptionList.addAll(dbFormFieldOptionList)
                     combinedOptionList.addAll(dbFormFieldEntOptsList)
                     combinedOptionList.orderByFields(["sequenceNum"])
@@ -297,14 +299,14 @@ class ScreenForm {
                             MNode entityOptionsNode = widgetNode.append("entity-options", [text:((String) optionValue.text ?: "\${description}")])
                             MNode entityFindNode = entityOptionsNode.append("entity-find", ["entity-name":optionValue.getString("entityName")])
 
-                            EntityList dbFormFieldEntOptsCondList = ecfi.getEntityFacade().find("moqui.screen.form.DbFormFieldEntOptsCond")
+                            EntityList dbFormFieldEntOptsCondList = ecfi.entityFacade.find("moqui.screen.form.DbFormFieldEntOptsCond")
                                     .condition([formId:formId, fieldName:fieldName, sequenceNum:optionValue.sequenceNum])
                                     .useCache(true).list()
                             for (EntityValue dbFormFieldEntOptsCond in dbFormFieldEntOptsCondList) {
                                 entityFindNode.append("econdition", ["field-name":(String) dbFormFieldEntOptsCond.entityFieldName, value:(String) dbFormFieldEntOptsCond.value])
                             }
 
-                            EntityList dbFormFieldEntOptsOrderList = ecfi.getEntityFacade().find("moqui.screen.form.DbFormFieldEntOptsOrder")
+                            EntityList dbFormFieldEntOptsOrderList = ecfi.entityFacade.find("moqui.screen.form.DbFormFieldEntOptsOrder")
                                     .condition([formId:formId, fieldName:fieldName, sequenceNum:optionValue.sequenceNum])
                                     .orderBy("orderSequenceNum").useCache(true).list()
                             for (EntityValue dbFormFieldEntOptsOrder in dbFormFieldEntOptsOrderList) {
@@ -320,9 +322,9 @@ class ScreenForm {
                     mergeFieldNode(dbFormNode, newFieldNode, false)
                 }
 
-                ecfi.getScreenFacade().dbFormNodeByIdCache.put(formId, dbFormNode)
+                ecfi.screenFacade.dbFormNodeByIdCache.put(formId, dbFormNode)
             } finally {
-                if (!alreadyDisabled) ecfi.getExecutionContext().getArtifactExecution().enableAuthz()
+                if (!alreadyDisabled) ecfi.getEci().artifactExecutionFacade.enableAuthz()
             }
         }
 
@@ -330,7 +332,7 @@ class ScreenForm {
     }
 
     boolean isDisplayOnly() {
-        ContextStack cs = ecfi.getEci().getContext()
+        ContextStack cs = ecfi.getEci().contextStack
         return cs.getByString("formDisplayOnly") == "true" || cs.getByString("formDisplayOnly_${formName}") == "true"
     }
 
@@ -524,7 +526,7 @@ class ScreenForm {
     }
 
     void addEntityFields(EntityDefinition ed, String include, String fieldType, String serviceVerb, MNode baseFormNode) {
-        for (String fieldName in ed.getFieldNames(include == "all" || include == "pk", include == "all" || include == "nonpk", include == "all" || include == "nonpk")) {
+        for (String fieldName in ed.getFieldNames(include == "all" || include == "pk", include == "all" || include == "nonpk")) {
             String efType = ed.getFieldInfo(fieldName).type ?: "text-long"
             if (baseFormNode.name == "form-list" && efType in ['text-long', 'text-very-long', 'binary-very-long']) continue
 
@@ -628,7 +630,7 @@ class ScreenForm {
             if (relDefaultDescriptionField) textStr = "\${" + relDefaultDescriptionField + " ?: ''} [\${" + relKeyField + "}]"
             else textStr = "[\${" + relKeyField + "}]"
             if (oneRelNode != null) subFieldNode.append("display-entity",
-                    ["entity-name":oneRelNode.attribute("related-entity-name"), "text":textStr])
+                    ["entity-name":(oneRelNode.attribute("related") ?: oneRelNode.attribute("related-entity-name")), "text":textStr])
             else subFieldNode.append("display", null)
             break
         case "find-display":
@@ -653,7 +655,8 @@ class ScreenForm {
                 String textStr
                 if (relDefaultDescriptionField) textStr = "\${" + relDefaultDescriptionField + " ?: ''} [\${" + relKeyField + "}]"
                 else textStr = "[\${" + relKeyField + "}]"
-                subFieldNode.append("display-entity", ["entity-name":oneRelNode.attribute("related-entity-name"), "text":textStr])
+                subFieldNode.append("display-entity", ["text":textStr,
+                        "entity-name":(oneRelNode.attribute("related") ?: oneRelNode.attribute("related-entity-name"))])
             } else {
                 subFieldNode.append("display", null)
             }
@@ -744,7 +747,7 @@ class ScreenForm {
             String fileLocation = templateLocation.substring(0, templateLocation.indexOf("#"))
             String widgetTemplateName = templateLocation.substring(templateLocation.indexOf("#") + 1)
 
-            MNode widgetTemplatesNode = ecfi.getScreenFacade().getWidgetTemplatesNodeByLocation(fileLocation)
+            MNode widgetTemplatesNode = ecfi.screenFacade.getWidgetTemplatesNodeByLocation(fileLocation)
             MNode widgetTemplateNode = widgetTemplatesNode?.first({ MNode it -> it.attribute("name") == widgetTemplateName })
             if (widgetTemplateNode == null) throw new IllegalArgumentException("Could not find widget-template [${widgetTemplateName}] in [${fileLocation}]")
 
@@ -884,11 +887,14 @@ class ScreenForm {
         }
     }
 
-    static ListOrderedMap getFieldOptions(MNode widgetNode, ExecutionContext ec) {
+    static LinkedHashMap<String, String> getFieldOptions(MNode widgetNode, ExecutionContext ec) {
         MNode fieldNode = widgetNode.parent.parent
-        ListOrderedMap options = new ListOrderedMap()
-        for (MNode childNode in widgetNode.children) {
-            if (childNode.name == "entity-options") {
+        LinkedHashMap<String, String> options = new LinkedHashMap<>()
+        ArrayList<MNode> widgetChildren = widgetNode.children
+        int widgetChildrenSize = widgetChildren.size()
+        for (int wci = 0; wci < widgetChildrenSize; wci++) {
+            MNode childNode = (MNode) widgetChildren.get(wci)
+            if ("entity-options".equals(childNode.name)) {
                 MNode entityFindNode = childNode.first("entity-find")
                 EntityFindImpl ef = (EntityFindImpl) ec.entity.find(entityFindNode.attribute('entity-name'))
                 ef.findNode(entityFindNode)
@@ -897,7 +903,10 @@ class ScreenForm {
 
                 if (ef.shouldCache()) {
                     // do the date filtering after the query
-                    for (MNode df in entityFindNode.children("date-filter")) {
+                    ArrayList<MNode> dateFilterList = entityFindNode.children("date-filter")
+                    int dateFilterListSize = dateFilterList.size()
+                    for (int k = 0; k < dateFilterListSize; k++) {
+                        MNode df = (MNode) dateFilterList.get(k)
                         EntityCondition dateEc = ec.entity.conditionFactory.makeConditionDate(df.attribute("from-field-name") ?: "fromDate",
                                 df.attribute("thru-field-name") ?: "thruDate",
                                 (df.attribute("valid-date") ? ec.resource.expression(df.attribute("valid-date"), null) as Timestamp : ec.user.nowTimestamp))
@@ -911,7 +920,7 @@ class ScreenForm {
                     EntityValue ev = (EntityValue) eli.get(i)
                     addFieldOption(options, fieldNode, childNode, ev, ec)
                 }
-            } else if (childNode.name == "list-options") {
+            } else if ("list-options".equals(childNode.name)) {
                 Object listObject = ec.resource.expression(childNode.attribute('list'), null)
                 if (listObject instanceof EntityListIterator) {
                     EntityListIterator eli
@@ -927,23 +936,24 @@ class ScreenForm {
                         if (listOption instanceof Map) {
                             addFieldOption(options, fieldNode, childNode, (Map) listOption, ec)
                         } else {
-                            options.put(listOption, listOption)
+                            String loString = StupidJavaUtilities.toPlainString(listOption)
+                            if (loString != null) options.put(loString, loString)
                             // addFieldOption(options, fieldNode, childNode, [entry:listOption], ec)
                         }
                     }
                 }
-            } else if (childNode.name == "option") {
-                String key = ec.resource.expand((String) childNode.attribute('key'), null)
-                String text = ec.resource.expand((String) childNode.attribute('text'), null)
+            } else if ("option".equals(childNode.name)) {
+                String key = ec.resource.expand(childNode.attribute('key'), null)
+                String text = ec.resource.expand(childNode.attribute('text'), null)
                 options.put(key, text ?: key)
             }
         }
         return options
     }
 
-    static void addFieldOption(ListOrderedMap options, MNode fieldNode, MNode childNode, Map listOption,
+    static void addFieldOption(LinkedHashMap<String, String> options, MNode fieldNode, MNode childNode, Map listOption,
                                ExecutionContext ec) {
-        EntityValueBase listOptionEvb = listOption instanceof EntityValueImpl ? listOption : null
+        EntityValueBase listOptionEvb = listOption instanceof EntityValueBase ? listOption : null
         if (listOptionEvb != null) {
             ec.context.push(listOptionEvb.getMap())
         } else {
@@ -951,30 +961,29 @@ class ScreenForm {
         }
         try {
             String key = null
-            String keyAttr = (String) childNode.attribute('key')
-            if (keyAttr) {
+            String keyAttr = childNode.attribute('key')
+            if (keyAttr != null && keyAttr.length() > 0) {
                 key = ec.resource.expand(keyAttr, null)
                 // we just did a string expand, if it evaluates to a literal "null" then there was no value
                 if (key == "null") key = null
             } else if (listOptionEvb != null) {
                 String keyFieldName = listOptionEvb.getEntityDefinition().getPkFieldNames().get(0)
-                if (keyFieldName) key = ec.context.getByString(keyFieldName)
+                if (keyFieldName != null && keyFieldName.length() > 0) key = ec.context.getByString(keyFieldName)
             }
             if (key == null) key = ec.context.getByString(fieldNode.attribute('name'))
             if (key == null) return
 
             String text = childNode.attribute('text')
-            if (!text) {
-                if ((listOptionEvb == null || listOptionEvb.getEntityDefinition().isField("description"))
-                        && listOption["description"]) {
-                    options.put(key, listOption["description"])
+            if (text == null || text.length() == 0) {
+                if (listOptionEvb == null || listOptionEvb.getEntityDefinition().isField("description")) {
+                    Object desc = listOption.get("description")
+                    options.put(key, desc != null ? (String) desc : key)
                 } else {
                     options.put(key, key)
                 }
-
             } else {
                 String value = ec.resource.expand(text, null)
-                if (value == "null") value = key
+                if ("null".equals(value)) value = key
                 options.put(key, value)
             }
         } finally {
@@ -1001,6 +1010,7 @@ class ScreenForm {
 
         private ArrayList<MNode> allFieldNodes
         private Map<String, MNode> fieldNodeMap = new LinkedHashMap<>()
+        private Map<String, FtlNodeWrapper> fieldFtlNodeMap = new LinkedHashMap<>()
 
         private boolean isUploadForm = false
         private boolean isFormHeaderFormVal = false
@@ -1019,7 +1029,9 @@ class ScreenForm {
             int afnSize = allFieldNodes.size()
             for (int i = 0; i < afnSize; i++) {
                 MNode fieldNode = (MNode) allFieldNodes.get(i)
-                fieldNodeMap.put(fieldNode.attribute("name"), fieldNode)
+                String fieldName = fieldNode.attribute("name")
+                fieldNodeMap.put(fieldName, fieldNode)
+                fieldFtlNodeMap.put(fieldName, FtlNodeWrapper.wrapNode(fieldNode))
             }
 
             isUploadForm = formNode.depthFirst({ MNode it -> it.name == "file" }).size() > 0
@@ -1037,6 +1049,7 @@ class ScreenForm {
         }
         // MNode getFormMNode() { return formNode }
         FtlNodeWrapper getFtlFormNode() { return ftlFormNode }
+        FtlNodeWrapper getFtlFieldNode(String fieldName) { return fieldFtlNodeMap.get(fieldName) }
 
         boolean isUpload() { return isUploadForm }
         boolean isHeaderForm() { return isFormHeaderFormVal }
@@ -1048,12 +1061,12 @@ class ScreenForm {
             String validateService = fieldNode.attribute('validate-service')
             String validateEntity = fieldNode.attribute('validate-entity')
             if (validateService) {
-                ServiceDefinition sd = ecfi.getServiceFacade().getServiceDefinition(validateService)
+                ServiceDefinition sd = ecfi.serviceFacade.getServiceDefinition(validateService)
                 if (sd == null) throw new IllegalArgumentException("Invalid validate-service name [${validateService}] in field [${fieldName}] of form [${location}]")
                 MNode parameterNode = sd.getInParameter((String) fieldNode.attribute('validate-parameter') ?: fieldName)
                 return parameterNode
             } else if (validateEntity) {
-                EntityDefinition ed = ecfi.getEntityFacade().getEntityDefinition(validateEntity)
+                EntityDefinition ed = ecfi.entityFacade.getEntityDefinition(validateEntity)
                 if (ed == null) throw new IllegalArgumentException("Invalid validate-entity name [${validateEntity}] in field [${fieldName}] of form [${location}]")
                 MNode efNode = ed.getFieldNode((String) fieldNode.attribute('validate-field') ?: fieldName)
                 return efNode
@@ -1067,8 +1080,9 @@ class ScreenForm {
 
             if (formNode.hasChild("field-layout")) for (MNode fieldNode in formNode.children("field")) {
                 MNode fieldLayoutNode = formNode.first("field-layout")
-                if (!fieldLayoutNode.depthFirst({ MNode it -> it.name == "field-ref" && it.attribute("name") == fieldNode.attribute("name") }))
-                    fieldList.add(FtlNodeWrapper.wrapNode(fieldNode))
+                String fieldName = fieldNode.attribute("name")
+                if (!fieldLayoutNode.depthFirst({ MNode it -> it.name == "field-ref" && it.attribute("name") == fieldName }))
+                    fieldList.add(fieldFtlNodeMap.get(fieldName))
             }
 
             nonReferencedFieldList = fieldList
@@ -1081,11 +1095,19 @@ class ScreenForm {
             return headerField.hasChild("submit")
         }
         boolean isListFieldHidden(MNode fieldNode) {
+            if (isListFieldHiddenAttr(fieldNode)) return true
+            return isListFieldHiddenWidget(fieldNode)
+        }
+
+        private boolean isListFieldHiddenAttr(MNode fieldNode) {
             String hideAttr = fieldNode.attribute("hide")
             if (hideAttr != null && hideAttr.length() > 0) {
-                boolean hideResult = ecfi.getEci().resource.condition(hideAttr, "")
-                if (hideResult) return true
+                return ecfi.getEci().resource.condition(hideAttr, "")
             }
+            return false
+        }
+
+        private boolean isListFieldHiddenWidget(MNode fieldNode) {
             // if default-field or any conditional-field don't have hidden or ignored elements then it's not hidden
             MNode defaultField = fieldNode.first("default-field")
             if (defaultField != null && !defaultField.hasChild("hidden") && !defaultField.hasChild("ignored")) return false
@@ -1093,6 +1115,7 @@ class ScreenForm {
             for (MNode condField in condFieldList) if (!condField.hasChild("hidden") && !condField.hasChild("ignored")) return false
             return true
         }
+
         ArrayList<FtlNodeWrapper> getListHiddenFieldList() {
             if (hiddenFieldList != null) return hiddenFieldList
 
@@ -1100,7 +1123,7 @@ class ScreenForm {
             int afnSize = allFieldNodes.size()
             for (int i = 0; i < afnSize; i++) {
                 MNode fieldNode = (MNode) allFieldNodes.get(i)
-                if (isListFieldHidden(fieldNode)) fieldList.add(FtlNodeWrapper.wrapNode(fieldNode))
+                if (isListFieldHiddenWidget(fieldNode) && !isListFieldHiddenAttr(fieldNode)) fieldList.add(FtlNodeWrapper.wrapNode(fieldNode))
             }
 
             hiddenFieldList = fieldList
@@ -1110,20 +1133,128 @@ class ScreenForm {
         boolean hasFormListColumns() { return formNode.children("form-list-column").size() > 0 }
 
         String getUserActiveFormConfigId(ExecutionContext ec) {
-            EntityValue fcu = ecfi.getEntityFacade(ec.tenantId).find("moqui.screen.form.FormConfigUser")
+            EntityValue fcu = ecfi.entityFacade.find("moqui.screen.form.FormConfigUser")
                     .condition("userId", ec.user.userId).condition("formLocation", location).useCache(true).one()
-            if (fcu != null) return fcu.get("formConfigId")
+            if (fcu != null) return (String) fcu.getNoCheckSimple("formConfigId")
 
             // Maybe not do this at all and let it be a future thing where the user selects an active one from options available through groups
-            EntityList fcugvList = ecfi.getEntityFacade(ec.tenantId).find("moqui.screen.form.FormConfigUserGroupView")
+            EntityList fcugvList = ecfi.entityFacade.find("moqui.screen.form.FormConfigUserGroupView")
                     .condition("userGroupId", EntityCondition.IN, ec.user.userGroupIdSet)
                     .condition("formLocation", location).useCache(true).list()
             if (fcugvList.size() > 0) {
                 // FUTURE: somehow make a better choice than just the first? see note above too...
-                return fcugvList.get(0).get("formConfigId")
+                return (String) fcugvList.get(0).getNoCheckSimple("formConfigId")
             }
 
             return null
+        }
+
+        ArrayList<Integer> getFormListColumnCharWidths(ArrayList<ArrayList<FtlNodeWrapper>> formListColumnInfo, int originalLineWidth) {
+            int numCols = formListColumnInfo.size()
+            ArrayList<Integer> charWidths = new ArrayList<>(numCols)
+            for (int i = 0; i < numCols; i++) charWidths.add(null)
+            if (originalLineWidth == 0) originalLineWidth = 132
+            int lineWidth = originalLineWidth;
+            // leave room for 1 space between each column
+            lineWidth -= (numCols - 1)
+
+            // set fixed column widths and get a total of fixed columns, remaining characters to be split among percent width cols
+            ArrayList<BigDecimal> percentWidths = new ArrayList<>(numCols)
+            for (int i = 0; i < numCols; i++) percentWidths.add(null)
+            int fixedColsWidth = 0
+            int fixedColsCount = 0
+            for (int i = 0; i < numCols; i++) {
+                ArrayList<FtlNodeWrapper> colNodes = (ArrayList<FtlNodeWrapper>) formListColumnInfo.get(i)
+                int charWidth = -1
+                BigDecimal percentWidth = null
+                for (int j = 0; j < colNodes.size(); j++) {
+                    FtlNodeWrapper fieldFtlNode = (FtlNodeWrapper) colNodes.get(j)
+                    MNode fieldNode = fieldFtlNode.getMNode()
+                    String pwAttr = fieldNode.attribute("print-width")
+                    if (pwAttr == null || pwAttr.isEmpty()) continue
+                    BigDecimal curWidth = new BigDecimal(pwAttr)
+                    if (curWidth == BigDecimal.ZERO) {
+                        charWidth = 0
+                        // no separator char needed for columns not displayed so add back to lineWidth
+                        lineWidth++
+                        continue
+                    }
+                    if ("characters".equals(fieldNode.attribute("print-width-type"))) {
+                        if (curWidth.intValue() > charWidth) charWidth = curWidth.intValue()
+                    } else {
+                        if (percentWidth == null || curWidth > percentWidth) percentWidth = curWidth
+                    }
+                }
+                if (charWidth >= 0) {
+                    if (percentWidth != null) {
+                        // if we have char and percent widths, calculate effective chars of percent width and if greater use that
+                        int percentChars = ((percentWidth / 100) * lineWidth).intValue()
+                        if (percentChars < charWidth) {
+                            charWidths.set(i, charWidth)
+                            fixedColsWidth += charWidth
+                            fixedColsCount++
+                        } else {
+                            percentWidths.set(i, percentWidth)
+                        }
+                    } else {
+                        charWidths.set(i, charWidth)
+                        fixedColsWidth += charWidth
+                        fixedColsCount++
+                    }
+                } else {
+                    if (percentWidth != null) percentWidths.set(i, percentWidth)
+                }
+            }
+
+            // now we have all fixed widths, calculate and set percent widths
+            int widthForPercentCols = lineWidth - fixedColsWidth
+            if (widthForPercentCols < 0) throw new IllegalArgumentException("In form ${formName} fixed width columns exceeded total line characters ${originalLineWidth} by ${-widthForPercentCols} characters")
+            int percentColsCount = numCols - fixedColsCount
+
+            // scale column percents to 100, fill in missing
+            BigDecimal percentTotal = 0
+            for (int i = 0; i < numCols; i++) {
+                BigDecimal colPercent = (BigDecimal) percentWidths.get(i)
+                if (colPercent == null) {
+                    if (charWidths.get(i) != null) continue
+                    BigDecimal percentWidth = (1 / percentColsCount) * 100
+                    percentWidths.set(i, percentWidth)
+                    percentTotal += percentWidth
+                } else {
+                    percentTotal += colPercent
+                }
+            }
+            int percentColsUsed = 0
+            BigDecimal percentScale = 100 / percentTotal
+            for (int i = 0; i < numCols; i++) {
+                BigDecimal colPercent = (BigDecimal) percentWidths.get(i)
+                if (colPercent == null) continue
+                BigDecimal actualPercent = colPercent * percentScale
+                percentWidths.set(i, actualPercent)
+                int percentChars = ((actualPercent / 100.0) * widthForPercentCols).setScale(0, RoundingMode.HALF_EVEN).intValue()
+                charWidths.set(i, percentChars)
+                percentColsUsed += percentChars
+            }
+
+            // adjust for over/underflow
+            if (percentColsUsed != widthForPercentCols) {
+                int diffRemaining = widthForPercentCols - percentColsUsed
+                int diffPerCol = (diffRemaining / percentColsCount).setScale(0, RoundingMode.UP).intValue()
+                for (int i = 0; i < numCols; i++) {
+                    if (percentWidths.get(i) == null) continue
+                    Integer curChars = charWidths.get(i)
+                    int adjustAmount = Math.abs(diffRemaining) > Math.abs(diffPerCol) ? diffPerCol : diffRemaining
+                    int newChars = curChars + adjustAmount
+                    if (newChars > 0) {
+                        charWidths.set(i, newChars)
+                        diffRemaining -= adjustAmount
+                        if (diffRemaining == 0) break
+                    }
+                }
+            }
+
+            logger.info("Text mode form-list: numCols=${numCols}, percentColsUsed=${percentColsUsed}, widthForPercentCols=${widthForPercentCols}, percentColsCount=${percentColsCount}\npercentWidths: ${percentWidths}\ncharWidths: ${charWidths}")
+            return charWidths
         }
 
         ArrayList<ArrayList<FtlNodeWrapper>> getFormListColumnInfo() {
@@ -1183,7 +1314,7 @@ class ScreenForm {
             return colInfoList
         }
         private ArrayList<ArrayList<FtlNodeWrapper>> makeDbFormListColumnInfo(String formConfigId, ExecutionContextImpl eci) {
-            EntityList formConfigFieldList = ecfi.getEntityFacade(eci.tenantId).find("moqui.screen.form.FormConfigField")
+            EntityList formConfigFieldList = ecfi.entityFacade.find("moqui.screen.form.FormConfigField")
                     .condition("formConfigId", formConfigId).orderBy("positionIndex").orderBy("positionSequence").useCache(true).list()
 
             // NOTE: calling code checks to see if this is not empty
@@ -1197,13 +1328,13 @@ class ScreenForm {
             ArrayList<FtlNodeWrapper> colFieldNodes = null
             for (int ci = 0; ci < fcfListSize; ci++) {
                 EntityValue fcfValue = (EntityValue) formConfigFieldList.get(ci)
-                int columnIndex = fcfValue.get("positionIndex") as int
+                int columnIndex = fcfValue.getNoCheckSimple("positionIndex") as int
                 if (columnIndex > curColIndex) {
                     if (colFieldNodes != null && colFieldNodes.size() > 0) colInfoList.add(colFieldNodes)
                     curColIndex = columnIndex
                     colFieldNodes = new ArrayList<>()
                 }
-                String fieldName = (String) fcfValue.get("fieldName")
+                String fieldName = (String) fcfValue.getNoCheckSimple("fieldName")
                 MNode fieldNode = (MNode) fieldNodeMap.get(fieldName)
                 if (fieldNode == null) throw new IllegalArgumentException("Could not find field ${fieldName} referenced in FormConfigField record for ID ${fcfValue.formConfigId} user ${eci.user.userId}, form at ${location}")
                 // skip hidden fields, they are handled separately
@@ -1229,8 +1360,9 @@ class ScreenForm {
                 MNode fieldNode = (MNode) allFieldNodes.get(i)
                 // skip hidden fields, they are handled separately
                 if (isListFieldHidden(fieldNode)) continue
-                if (!fieldsInFormListColumns.contains(fieldNode.attribute("name")))
-                    colFieldNodes.add(FtlNodeWrapper.wrapNode(fieldNode))
+                String fieldName = fieldNode.attribute("name")
+                if (!fieldsInFormListColumns.contains(fieldName))
+                    colFieldNodes.add(fieldFtlNodeMap.get(fieldName))
             }
 
             return colFieldNodes
@@ -1302,24 +1434,26 @@ class ScreenForm {
         void runFormListRowActions(ScreenRenderImpl sri, Object listEntry, int index, boolean hasNext) {
             // NOTE: this runs in a pushed-/sub-context, so just drop it in and it'll get cleaned up automatically
             String listEntryStr = formNode.attribute('list-entry')
+            ExecutionContextImpl eci = sri.ec
+            ContextStack context = eci.contextStack
             if (listEntryStr) {
-                sri.ec.context.put(listEntryStr, listEntry)
-                sri.ec.context.put(listEntryStr + "_index", index)
-                sri.ec.context.put(listEntryStr + "_has_next", hasNext)
+                context.put(listEntryStr, listEntry)
+                context.put(listEntryStr + "_index", index)
+                context.put(listEntryStr + "_has_next", hasNext)
             } else {
                 if (listEntry instanceof EntityValueBase) {
-                    sri.ec.context.putAll(((EntityValueBase) listEntry).getValueMap())
+                    context.putAll(((EntityValueBase) listEntry).getValueMap())
                 } else if (listEntry instanceof Map) {
-                    sri.ec.context.putAll((Map) listEntry)
+                    context.putAll((Map) listEntry)
                 } else {
-                    sri.ec.context.put("listEntry", listEntry)
+                    context.put("listEntry", listEntry)
                 }
                 String listStr = formNode.attribute('list')
-                sri.ec.context.put(listStr + "_index", index)
-                sri.ec.context.put(listStr + "_has_next", hasNext)
-                sri.ec.context.put(listStr + "_entry", listEntry)
+                context.put(listStr + "_index", index)
+                context.put(listStr + "_has_next", hasNext)
+                context.put(listStr + "_entry", listEntry)
             }
-            if (rowActions) rowActions.run(sri.ec)
+            if (rowActions != null) rowActions.run(eci)
         }
 
         ArrayList<EntityValue> makeFormListFindFields(String formListFindId, ExecutionContext ec) {
@@ -1385,7 +1519,7 @@ class ScreenForm {
             EntityList flfuList = ec.entity.find("moqui.screen.form.FormListFindUser")
                     .condition("userId", ec.user.userId).useCache(true).list()
             EntityList flfugList = ec.entity.find("moqui.screen.form.FormListFindUserGroup")
-                    .condition("userGroupId", EntityCondition.IN, ec.user.userGroupIdSet).useCache(false).list()
+                    .condition("userGroupId", EntityCondition.IN, ec.user.userGroupIdSet).useCache(true).list()
             Set<String> userOnlyFlfIdSet = new HashSet<>()
             Set<String> formListFindIdSet = new HashSet<>()
             for (EntityValue ev in flfuList) {
@@ -1397,51 +1531,13 @@ class ScreenForm {
 
             // get info for each formListFindId
             List<Map<String, Object>> flfInfoList = new LinkedList<>()
-            for (String formListFindId in formListFindIdSet) {
-                EntityValue formListFind = ec.entity.find("moqui.screen.form.FormListFind")
-                        .condition("formListFindId", formListFindId).useCache(true).one()
-                Map<String, String> flfParameters = makeFormListFindParameters(formListFindId, ec)
-                flfParameters.put("formListFindId", formListFindId)
-                if (formListFind.orderByField) flfParameters.put("orderByField", (String) formListFind.orderByField)
-                Map<String, Object> flfInfo = [description:formListFind.description, formListFind:formListFind,
-                        findParameters:flfParameters, isByUserId:userOnlyFlfIdSet.contains(formListFindId) ? "true" : "false"]
-                flfInfoList.add(flfInfo)
-            }
+            for (String formListFindId in formListFindIdSet)
+                flfInfoList.add(getFormListFindInfo(formListFindId, ec, userOnlyFlfIdSet))
 
             // sort by description
             StupidUtilities.orderMapList(flfInfoList, ["description"])
 
             return flfInfoList
-        }
-
-        Map<String, String> makeFormListFindParameters(String formListFindId, ExecutionContext ec) {
-            EntityList flffList = ec.entity.find("moqui.screen.form.FormListFindField")
-                    .condition("formListFindId", formListFindId).useCache(true).list()
-
-            Map<String, String> parmMap = new LinkedHashMap<>()
-            parmMap.put("formListFindId", formListFindId)
-
-            int flffSize = flffList.size()
-            for (int i = 0; i < flffSize; i++) {
-                EntityValue flff = (EntityValue) flffList.get(i)
-                String fn = flff.fieldName
-                if (flff.fieldValue) {
-                    parmMap.put(fn, (String) flff.fieldValue)
-                    String op = (String) flff.fieldOperator
-                    if (op && !"equals".equals(op)) parmMap.put(fn + "_op", op)
-                    String not = (String) flff.fieldNot
-                    if ("Y".equals(not)) parmMap.put(fn + "_not", "Y")
-                    String ic = (String) flff.fieldIgnoreCase
-                    if ("Y".equals(ic)) parmMap.put(fn + "_ic", "Y")
-                } else if (flff.fieldPeriod) {
-                    parmMap.put(fn + "_period", (String) flff.fieldPeriod)
-                    parmMap.put(fn + "_poffset", flff.fieldPerOffset as String)
-                } else if (flff.fieldFrom || flff.fieldThru) {
-                    if (flff.fieldFrom) parmMap.put(fn + "_from", (String) flff.fieldFrom)
-                    if (flff.fieldThru) parmMap.put(fn + "_thru", (String) flff.fieldThru)
-                }
-            }
-            return parmMap
         }
 
         EntityValue getActiveFormListFind(ExecutionContextImpl ec) {
@@ -1452,9 +1548,49 @@ class ScreenForm {
         }
     }
 
-    static void processFormSavedFind(ExecutionContextImpl ec) {
-        String userId = ec.user.userId
-        ContextStack cs = ec.context
+    static Map<String, String> makeFormListFindParameters(String formListFindId, ExecutionContext ec) {
+        EntityList flffList = ec.entity.find("moqui.screen.form.FormListFindField")
+                .condition("formListFindId", formListFindId).useCache(true).list()
+
+        Map<String, String> parmMap = new LinkedHashMap<>()
+        parmMap.put("formListFindId", formListFindId)
+
+        int flffSize = flffList.size()
+        for (int i = 0; i < flffSize; i++) {
+            EntityValue flff = (EntityValue) flffList.get(i)
+            String fn = flff.fieldName
+            if (flff.fieldValue) {
+                parmMap.put(fn, (String) flff.fieldValue)
+                String op = (String) flff.fieldOperator
+                if (op && !"equals".equals(op)) parmMap.put(fn + "_op", op)
+                String not = (String) flff.fieldNot
+                if ("Y".equals(not)) parmMap.put(fn + "_not", "Y")
+                String ic = (String) flff.fieldIgnoreCase
+                if ("Y".equals(ic)) parmMap.put(fn + "_ic", "Y")
+            } else if (flff.fieldPeriod) {
+                parmMap.put(fn + "_period", (String) flff.fieldPeriod)
+                parmMap.put(fn + "_poffset", flff.fieldPerOffset as String)
+            } else if (flff.fieldFrom || flff.fieldThru) {
+                if (flff.fieldFrom) parmMap.put(fn + "_from", (String) flff.fieldFrom)
+                if (flff.fieldThru) parmMap.put(fn + "_thru", (String) flff.fieldThru)
+            }
+        }
+        return parmMap
+    }
+
+    static Map<String, Object> getFormListFindInfo(String formListFindId, ExecutionContext ec, Set<String> userOnlyFlfIdSet) {
+        EntityValue formListFind = ec.entity.find("moqui.screen.form.FormListFind")
+                .condition("formListFindId", formListFindId).useCache(true).one()
+        Map<String, String> flfParameters = makeFormListFindParameters(formListFindId, ec)
+        flfParameters.put("formListFindId", formListFindId)
+        if (formListFind.orderByField) flfParameters.put("orderByField", (String) formListFind.orderByField)
+        return [description:formListFind.description, formListFind:formListFind, findParameters:flfParameters,
+                isByUserId:userOnlyFlfIdSet?.contains(formListFindId) ? "true" : "false"]
+    }
+
+    static String processFormSavedFind(ExecutionContextImpl ec) {
+        String userId = ec.userFacade.userId
+        ContextStack cs = ec.contextStack
 
         String formListFindId = (String) cs.formListFindId
         EntityValue flf = formListFindId ? ec.entity.find("moqui.screen.form.FormListFind")
@@ -1463,14 +1599,14 @@ class ScreenForm {
         boolean isDelete = cs.containsKey("DeleteFind")
 
         if (isDelete) {
-            if (flf == null) { ec.message.addError("Saved find with ID ${formListFindId} not found, not deleting"); return; }
+            if (flf == null) { ec.messageFacade.addError("Saved find with ID ${formListFindId} not found, not deleting"); return null; }
 
             // delete FormListFindUser record; if there are no other FormListFindUser records or FormListFindUserGroup
             //     records, delete the FormListFind
             EntityValue flfu = ec.entity.find("moqui.screen.form.FormListFindUser").condition("userId", userId)
                     .condition("formListFindId", formListFindId).useCache(false).one()
             // NOTE: if no FormListFindUser nothing to delete... consider removing form from all groups the user is in?
-            if (flfu == null) return
+            if (flfu == null) return null
             flfu.delete()
 
             long userCount = ec.entity.find("moqui.screen.form.FormListFindUser")
@@ -1485,22 +1621,22 @@ class ScreenForm {
                             .condition("formListFindId", formListFindId).deleteAll()
                 }
             }
-            return
+            return null
         }
 
         String formLocation = cs.formLocation
-        if (!formLocation) { ec.message.addError("No form location specified, cannot process saved find"); return; }
+        if (!formLocation) { ec.message.addError("No form location specified, cannot process saved find"); return null; }
         int lastDotIndex = formLocation.lastIndexOf(".")
-        if (lastDotIndex < 0) { ec.message.addError("Form location invalid, cannot process saved find"); return; }
+        if (lastDotIndex < 0) { ec.message.addError("Form location invalid, cannot process saved find"); return null; }
         String screenLocation = formLocation.substring(0, lastDotIndex)
-        int lastDollarIndex = formLocation.lastIndexOf("\$")
-        if (lastDollarIndex < 0) { ec.message.addError("Form location invalid, cannot process saved find"); return; }
+        int lastDollarIndex = formLocation.lastIndexOf('$')
+        if (lastDollarIndex < 0) { ec.message.addError("Form location invalid, cannot process saved find"); return null; }
         String formName = formLocation.substring(lastDollarIndex + 1)
 
-        ScreenDefinition screenDef = ec.ecfi.screenFacade.getScreenDefinition(screenLocation)
-        if (screenDef == null) { ec.message.addError("Screen not found at ${screenLocation}, cannot process saved find"); return; }
+        ScreenDefinition screenDef = ec.screenFacade.getScreenDefinition(screenLocation)
+        if (screenDef == null) { ec.message.addError("Screen not found at ${screenLocation}, cannot process saved find"); return null; }
         ScreenForm screenForm = screenDef.getForm(formName)
-        if (screenForm == null) { ec.message.addError("Form ${formName} not found in screen at ${screenLocation}, cannot process saved find"); return; }
+        if (screenForm == null) { ec.message.addError("Form ${formName} not found in screen at ${screenLocation}, cannot process saved find"); return null; }
         FormInstance formInstance = screenForm.getFormInstance()
 
         // see if there is an existing FormConfig record
@@ -1508,7 +1644,7 @@ class ScreenForm {
             // make sure the FormListFind.formLocation matches the current formLocation
             if (formLocation != flf.formLocation) {
                 ec.message.addError("Specified form location did not match form on Saved Find ${formListFindId}, not updating")
-                return
+                return null
             }
 
             // make sure the user or group the user is in is associated with the FormListFind
@@ -1520,7 +1656,7 @@ class ScreenForm {
                         .condition("formListFindId", formListFindId).useCache(false).count()
                 if (groupCount == 0L) {
                     ec.message.addError("You are not associated with Saved Find ${formListFindId}, cannot update")
-                    return
+                    return formListFindId
                 }
             }
 
@@ -1552,13 +1688,15 @@ class ScreenForm {
             ArrayList<EntityValue> flffList = formInstance.makeFormListFindFields(formListFindId, ec)
             for (EntityValue flff in flffList) flff.create()
         }
+
+        return formListFindId
     }
 
     static void saveFormConfig(ExecutionContextImpl ec) {
-        String userId = ec.user.userId
-        ContextStack cs = ec.context
+        String userId = ec.userFacade.userId
+        ContextStack cs = ec.contextStack
         String formLocation = cs.get("formLocation")
-        if (!formLocation) { ec.message.addError("No form location specified, cannot save form configuration"); return; }
+        if (!formLocation) { ec.messageFacade.addError("No form location specified, cannot save form configuration"); return; }
 
         // see if there is an existing FormConfig record
         String formConfigId = cs.get("formConfigId")

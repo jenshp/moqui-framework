@@ -32,7 +32,7 @@ class SystemScreenRenderTests extends Specification {
 
     def setupSpec() {
         ec = Moqui.getExecutionContext()
-        ec.user.loginUser("john.doe", "moqui", null)
+        ec.user.loginUser("john.doe", "moqui")
         screenTest = ec.screen.makeTest().baseScreenPath("apps/system")
     }
 
@@ -77,7 +77,7 @@ class SystemScreenRenderTests extends Specification {
         "ArtifactHitBins?artifactName=basic&artifactName_op=contains" | "moqui.basic.Enumeration" | "create"
         // Cache screens
         "Cache/CacheList" | "entity.definition" | "artifact.tarpit.hits"
-        "Cache/CacheElements?orderByField=key&cacheName=DEFAULT__l10n.message" | "\${artifactName}::en_US" | "evictionStrategy"
+        "Cache/CacheElements?orderByField=key&cacheName=l10n.message" | '${artifactName}::en_US' | "evictionStrategy"
 
         // Localization screens
         "Localization/Messages" | "Add" | "Añadir"
@@ -92,12 +92,6 @@ class SystemScreenRenderTests extends Specification {
         // Resource screen
         // NOTE: without a real browser client not much to test in ElFinder
         "Resource/ElFinder" | "" | ""
-
-        // Scheduler screens
-        "Scheduler/SchedulerDetail" | "ServerServices" | "org.moqui.impl.ServerServices.clean#ArtifactData"
-        "Scheduler/Jobs" | "clean_ArtifactData_daily" | ""
-        "Scheduler/Triggers" | "clean_ArtifactData_single" | ""
-        "Scheduler/History" | "Job Scheduled" | "clean_ArtifactData_daily"
 
         // Security screens
         "Security/UserAccount/UserAccountList?username=john.doe" | "john.doe" | "John Doe"

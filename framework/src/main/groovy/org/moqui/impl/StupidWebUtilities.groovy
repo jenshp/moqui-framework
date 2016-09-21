@@ -14,46 +14,28 @@
 package org.moqui.impl
 
 import groovy.transform.CompileStatic
-import org.apache.http.HttpEntity
-import org.apache.http.NameValuePair
-import org.apache.http.client.entity.UrlEncodedFormEntity
-import org.apache.http.client.methods.CloseableHttpResponse
-import org.apache.http.client.methods.HttpPost
-import org.apache.http.entity.ContentType
-import org.apache.http.entity.StringEntity
-import org.apache.http.impl.client.CloseableHttpClient
-import org.apache.http.impl.client.HttpClients
-import org.apache.http.message.BasicNameValuePair
-import org.apache.http.util.EntityUtils
-import org.owasp.esapi.ESAPI
-import org.owasp.validator.html.Policy
+import org.eclipse.jetty.client.HttpClient
+import org.eclipse.jetty.client.api.ContentResponse
+import org.eclipse.jetty.client.api.Request
+import org.eclipse.jetty.client.util.StringContentProvider
+import org.owasp.html.PolicyFactory
+import org.owasp.html.examples.EbayPolicyExample
 
+import java.nio.charset.StandardCharsets
 import javax.servlet.ServletRequest
 import javax.servlet.http.HttpSession
 import javax.servlet.ServletContext
 
-import org.owasp.esapi.Encoder
-import org.owasp.esapi.Validator
-
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-import java.nio.charset.Charset
 
 @CompileStatic
 class StupidWebUtilities {
     protected final static Logger logger = LoggerFactory.getLogger(StupidUtilities.class)
 
-    public static final Encoder defaultWebEncoder = ESAPI.encoder()
-    public static final Validator defaultWebValidator = ESAPI.validator()
-
-    private static Policy antiSamyPolicy = null
-    public static Policy getAntiSamyPolicy() {
-        if (antiSamyPolicy != null) return antiSamyPolicy
-        ClassLoader cl = Thread.currentThread().getContextClassLoader()
-        antiSamyPolicy = Policy.getInstance(cl.getResourceAsStream("antisamy-esapi.xml"))
-        return antiSamyPolicy
-    }
+    private static PolicyFactory safeHtmlPolicy = EbayPolicyExample.POLICY_DEFINITION
+    public static PolicyFactory getSafeHtmlPolicy() { return safeHtmlPolicy }
 
     static final char tildeChar = '~' as char
     public static Map<String, Object> getPathInfoParameterMap(String pathInfoStr) {
@@ -68,8 +50,8 @@ class StupidWebUtilities {
                 String element = (String) pathElements[i]
                 int equalsIndex = element.indexOf("=")
                 if (element.length() > 0 && element.charAt(0) == tildeChar && equalsIndex > 0) {
-                    String name = element.substring(1, equalsIndex)
-                    String value = element.substring(equalsIndex + 1)
+                    String name = URLDecoder.decode(element.substring(1, equalsIndex), "UTF-8")
+                    String value = URLDecoder.decode(element.substring(equalsIndex + 1), "UTF-8")
                     // NOTE: currently ignoring existing values, likely won't be any: Object curValue = paramMap.get(name)
                     if (paramMap == null) paramMap = new HashMap<String, Object>()
                     paramMap.put(name, value)
@@ -225,18 +207,18 @@ class StupidWebUtilities {
         boolean containsValue(Object o) { return mp.containsValue(o) }
         Object get(Object o) {
             // NOTE: in spite of warnings class reference to StupidWebUtilities.canonicalizeValue is necessary or Groovy blows up
-            return (o == null && !supportsNull) ? null : StupidWebUtilities.canonicalizeValue(mp.get(o))
+            return (o == null && !supportsNull) ? null : canonicalizeValue(mp.get(o))
         }
-        Object put(String k, Object v) { return StupidWebUtilities.canonicalizeValue(mp.put(k, v)) }
+        Object put(String k, Object v) { return canonicalizeValue(mp.put(k, v)) }
         Object remove(Object o) {
-            return (o == null && !supportsNull) ? null : StupidWebUtilities.canonicalizeValue(mp.remove(o))
+            return (o == null && !supportsNull) ? null : canonicalizeValue(mp.remove(o))
         }
         void putAll(Map<? extends String, ? extends Object> map) { if (map) mp.putAll(map) }
         void clear() { mp.clear() }
         Set<String> keySet() { return mp.keySet() }
         Collection<Object> values() {
             List<Object> values = new ArrayList<Object>(mp.size())
-            for (Object orig in mp.values()) values.add(StupidWebUtilities.canonicalizeValue(orig))
+            for (Object orig in mp.values()) values.add(canonicalizeValue(orig))
             return values
         }
         Set<Map.Entry<String, Object>> entrySet() {
@@ -252,7 +234,7 @@ class StupidWebUtilities {
         CanonicalizeEntry(String key, Object value) { this.key = key; this.value = value; }
         CanonicalizeEntry(Map.Entry<String, Object> entry) { this.key = entry.getKey(); this.value = entry.getValue(); }
         String getKey() { return key }
-        Object getValue() { return StupidWebUtilities.canonicalizeValue(value) }
+        Object getValue() { return canonicalizeValue(value) }
         Object setValue(Object v) { Object orig = value; value = v; return orig; }
     }
 
@@ -267,7 +249,7 @@ class StupidWebUtilities {
                 canVal = newList
                 for (Object obj in lst) {
                     if (obj instanceof CharSequence) {
-                        newList.add(defaultWebEncoder.canonicalize(obj.toString(), false))
+                        newList.add(URLDecoder.decode(obj.toString(), "UTF-8"))
                     } else {
                         newList.add(obj)
                     }
@@ -275,31 +257,48 @@ class StupidWebUtilities {
             }
         }
         // catch strings or lists with a single string in them unwrapped above
-        if (canVal instanceof CharSequence) canVal = defaultWebEncoder.canonicalize(canVal.toString(), false)
+        if (canVal instanceof CharSequence) canVal = URLDecoder.decode(canVal.toString(), "UTF-8")
         return canVal
+    }
+
+    static Map<String, Object> simplifyRequestParameters(ServletRequest request) {
+        Map<String, String[]> reqParmOrigMap = request.getParameterMap()
+        Map<String, Object> reqParmMap = new LinkedHashMap<>()
+        for (Map.Entry<String, String[]> entry in reqParmOrigMap.entrySet()) {
+            String[] valArray = entry.getValue()
+            if (valArray == null) {
+                reqParmMap.put(entry.getKey(), null)
+            } else {
+                int valLength = valArray.length
+                if (valLength == 0) {
+                    reqParmMap.put(entry.getKey(), null)
+                } else if (valLength == 1) {
+                    reqParmMap.put(entry.getKey(), valArray[0])
+                } else {
+                    ArrayList<String> newArray = new ArrayList<String>(valLength)
+                    for (int i = 0; i < valLength; i++) newArray.add(valArray[i])
+                    reqParmMap.put(entry.getKey(), newArray)
+                }
+            }
+        }
+        return reqParmMap
     }
 
     static String simpleHttpStringRequest(String location, String requestBody, String contentType) {
         if (!contentType) contentType = "text/plain"
         String resultString = ""
-        CloseableHttpClient httpClient = HttpClients.createDefault()
-        try {
-            HttpPost httpPost = new HttpPost(location)
-            if (requestBody) {
-                StringEntity requestEntity = new StringEntity(requestBody, ContentType.create(contentType, "UTF-8"))
-                httpPost.setEntity(requestEntity)
-                httpPost.setHeader("Content-Type", contentType)
-            }
 
-            CloseableHttpResponse response = httpClient.execute(httpPost)
-            try {
-                HttpEntity entity = response.getEntity()
-                resultString = StupidUtilities.toStringCleanBom(EntityUtils.toByteArray(entity))
-            } finally {
-                response.close()
-            }
+        HttpClient httpClient = new HttpClient()
+        httpClient.start()
+
+        try {
+            Request request = httpClient.POST(location)
+            if (requestBody) request.content(new StringContentProvider(contentType, requestBody, StandardCharsets.UTF_8), contentType)
+            ContentResponse response = request.send()
+            resultString = StupidUtilities.toStringCleanBom(response.getContent())
+
         } finally {
-            httpClient.close()
+            httpClient.stop()
         }
 
         return resultString
@@ -307,24 +306,18 @@ class StupidWebUtilities {
 
     static String simpleHttpMapRequest(String location, Map requestMap) {
         String resultString = ""
-        CloseableHttpClient httpClient = HttpClients.createDefault()
+
+        HttpClient httpClient = new HttpClient()
+        httpClient.start()
+
         try {
-            List<NameValuePair> nameValuePairs = new ArrayList<NameValuePair>()
+            Request request = httpClient.POST(location)
             if (requestMap) for (Map.Entry requestEntry in requestMap.entrySet())
-                nameValuePairs.add(new BasicNameValuePair(requestEntry.key as String, requestEntry.value as String))
-
-            HttpPost httpPost = new HttpPost(location)
-            if (nameValuePairs) httpPost.setEntity(new UrlEncodedFormEntity(nameValuePairs, Charset.forName("UTF-8")))
-
-            CloseableHttpResponse response = httpClient.execute(httpPost)
-            try {
-                HttpEntity entity = response.getEntity()
-                resultString = StupidUtilities.toStringCleanBom(EntityUtils.toByteArray(entity))
-            } finally {
-                response.close()
-            }
+                request.param(requestEntry.key as String, requestEntry.value as String)
+            ContentResponse response = request.send()
+            resultString = StupidUtilities.toStringCleanBom(response.getContent())
         } finally {
-            httpClient.close()
+            httpClient.stop()
         }
 
         return resultString

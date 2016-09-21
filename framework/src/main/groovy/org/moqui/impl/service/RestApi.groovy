@@ -23,24 +23,52 @@ import org.moqui.entity.EntityFind
 import org.moqui.impl.context.ArtifactExecutionInfoImpl
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
+import org.moqui.impl.context.UserFacadeImpl
 import org.moqui.impl.entity.EntityDefinition
-import org.moqui.impl.entity.EntityJavaUtil
+import org.moqui.impl.entity.FieldInfo
+import org.moqui.impl.util.RestSchemaUtil
+import org.moqui.jcache.MCache
 import org.moqui.util.MNode
+import org.moqui.util.SystemBinding
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
+import javax.cache.Cache
 import javax.servlet.http.HttpServletResponse
 
 @CompileStatic
 class RestApi {
     protected final static Logger logger = LoggerFactory.getLogger(RestApi.class)
 
-    protected ExecutionContextFactoryImpl ecfi
-    Map<String, ResourceNode> rootResourceMap = [:]
+    @SuppressWarnings("GrFinalVariableAccess")
+    protected final ExecutionContextFactoryImpl ecfi
+    @SuppressWarnings("GrFinalVariableAccess")
+    final MCache<String, ResourceNode> rootResourceCache
 
     RestApi(ExecutionContextFactoryImpl ecfi) {
         this.ecfi = ecfi
+        rootResourceCache = ecfi.getCacheFacade().getLocalCache("service.rest.api")
+        loadRootResourceNode(null)
+    }
 
+    ResourceNode getRootResourceNode(String name) {
+        ResourceNode resourceNode = rootResourceCache.get(name)
+        if (resourceNode != null) return resourceNode
+
+        loadRootResourceNode(name)
+        resourceNode = rootResourceCache.get(name)
+        if (resourceNode != null) return resourceNode
+
+        throw new ResourceNotFoundException("Service REST API Root resource not found with name ${name}")
+    }
+
+    synchronized void loadRootResourceNode(String name) {
+        if (name != null) {
+            ResourceNode resourceNode = rootResourceCache.get(name)
+            if (resourceNode != null) return
+        }
+
+        long startTime = System.currentTimeMillis()
         // find *.rest.xml files in component/service directories, put in rootResourceMap
         for (String location in this.ecfi.getComponentBaseLocations().values()) {
             ResourceReference serviceDirRr = this.ecfi.resourceFacade.getLocationReference(location + "/service")
@@ -50,28 +78,37 @@ class RestApi {
                 for (ResourceReference rr in serviceDirRr.directoryEntries) {
                     if (!rr.fileName.endsWith(".rest.xml")) continue
                     MNode rootNode = MNode.parse(rr)
-                    ResourceNode rn = new ResourceNode(rootNode, null, ecfi)
-                    rootResourceMap.put(rn.name, rn)
-                    logger.info("Loaded REST API from ${rr.getFileName()} (${rn.childPaths} paths, ${rn.childMethods} methods)")
-                    // logger.info(rn.toString())
+                    if (name == null || name.equals(rootNode.attribute("name"))) {
+                        ResourceNode rn = new ResourceNode(rootNode, null, ecfi)
+                        rootResourceCache.put(rn.name, rn)
+                        logger.info("Loaded REST API from ${rr.getFileName()} (${rn.childPaths} paths, ${rn.childMethods} methods)")
+                        // logger.info(rn.toString())
+                    }
                 }
             } else {
                 logger.warn("Can't load REST APIs from component at [${serviceDirRr.location}] because it doesn't support exists/directory/etc")
             }
         }
+        logger.info("Loaded REST API files, ${rootResourceCache.size()} roots, in ${System.currentTimeMillis() - startTime}ms")
+    }
+
+    /** Used in tools dashboard screen */
+    List<ResourceNode> getFreshRootResources() {
+        loadRootResourceNode(null)
+        List<ResourceNode> rootList = new ArrayList<>()
+        for (Cache.Entry<String, ResourceNode> entry in rootResourceCache.getEntryList()) rootList.add(entry.getValue())
+        return rootList
     }
 
     RestResult run(List<String> pathList, ExecutionContextImpl ec) {
-        if (!pathList) throw new ResourceNotFoundException("Cannot run REST service with no path")
+        if (pathList == null || pathList.size() == 0) throw new ResourceNotFoundException("Cannot run REST service with no path")
         String firstPath = pathList[0]
-        ResourceNode resourceNode = rootResourceMap.get(firstPath)
-        if (resourceNode == null) throw new ResourceNotFoundException("Root resource not found with name ${firstPath}")
+        ResourceNode resourceNode = getRootResourceNode(firstPath)
         return resourceNode.visit(pathList, 0, ec)
     }
 
     Map<String, Object> getRamlMap(String rootResourceName, String linkPrefix) {
-        ResourceNode resourceNode = rootResourceMap.get(rootResourceName)
-        if (resourceNode == null) throw new ResourceNotFoundException("Root resource not found with name ${rootResourceName}")
+        ResourceNode resourceNode = getRootResourceNode(rootResourceName)
 
         Map<String, Object> typesMap = new TreeMap<String, Object>()
 
@@ -84,7 +121,7 @@ class RestApi {
                                        'X-Page-Max-Index':[type:'integer', description:"Highest page index given page size and count of results"],
                                        'X-Page-Range-Low':[type:'integer', description:"Index of first result in page"],
                                        'X-Page-Range-High':[type:'integer', description:"Index of last result in page"]] as Map<String, Object>
-        rootMap.put('traits', [[paged:[queryParameters:EntityDefinition.ramlPaginationParameters, headers:headers]],
+        rootMap.put('traits', [[paged:[queryParameters:RestSchemaUtil.ramlPaginationParameters, headers:headers]],
             [service:[responses:[401:[description:"Authentication required"], 403:[description:"Access Forbidden (no authz)"],
                                  429:[description:"Too Many Requests (tarpit)"], 500:[description:"General Error"]]]],
             [entity:[responses:[401:[description:"Authentication required"], 403:[description:"Access Forbidden (no authz)"],
@@ -102,8 +139,7 @@ class RestApi {
         // TODO: support generate for all roots with empty path
         if (!rootPathList) throw new ResourceNotFoundException("No resource path specified")
         String rootResourceName = rootPathList[0]
-        ResourceNode resourceNode = rootResourceMap.get(rootResourceName)
-        if (resourceNode == null) throw new ResourceNotFoundException("Root resource not found with name ${rootResourceName}")
+        ResourceNode resourceNode = getRootResourceNode(rootResourceName)
 
         StringBuilder fullBasePath = new StringBuilder(basePath)
         for (String rootPath in rootPathList) fullBasePath.append('/').append(rootPath)
@@ -114,7 +150,7 @@ class RestApi {
                   version:(resourceNode.version ?: '1.0'), description:(resourceNode.description ?: '')],
             host:hostName, basePath:fullBasePath.toString(), schemes:schemes,
             securityDefinitions:[basicAuth:[type:'basic', description:'HTTP Basic Authentication'],
-                api_key:[type:"apiKey", name:"api_key", in:"header", description:'HTTP Header api_key, also supports tenant_id header']],
+                api_key:[type:"apiKey", name:"api_key", in:"header", description:'HTTP Header api_key']],
             consumes:['application/json', 'multipart/form-data'], produces:['application/json'],
         ]
 
@@ -142,10 +178,12 @@ class RestApi {
         ExecutionContextFactoryImpl ecfi
         String method
         PathNode pathNode
-        MethodHandler(String method, PathNode pathNode, ExecutionContextFactoryImpl ecfi) {
+        String requireAuthentication
+        MethodHandler(MNode methodNode, PathNode pathNode, ExecutionContextFactoryImpl ecfi) {
             this.ecfi = ecfi
-            this.method = method
+            method = methodNode.attribute("type")
             this.pathNode = pathNode
+            requireAuthentication = methodNode.attribute("require-authentication") ?: pathNode.requireAuthentication ?: "true"
         }
         abstract RestResult run(List<String> pathList, ExecutionContext ec)
         abstract void addToSwaggerMap(Map<String, Object> swaggerMap, Map<String, Map<String, Object>> resourceMap)
@@ -184,19 +222,32 @@ class RestApi {
 
     static class MethodService extends MethodHandler {
         String serviceName
-        MethodService(String method, MNode serviceNode, PathNode pathNode, ExecutionContextFactoryImpl ecfi) {
-            super(method, pathNode, ecfi)
+        MethodService(MNode methodNode, MNode serviceNode, PathNode pathNode, ExecutionContextFactoryImpl ecfi) {
+            super(methodNode, pathNode, ecfi)
             serviceName = serviceNode.attribute("name")
         }
         RestResult run(List<String> pathList, ExecutionContext ec) {
-            Map result = ec.getService().sync().name(serviceName).parameters(ec.context).call()
-            return new RestResult(result, null)
+            boolean loggedInAnonymous = false
+            if ("anonymous-all".equals(requireAuthentication)) {
+                ec.artifactExecution.setAnonymousAuthorizedAll()
+                loggedInAnonymous = ec.getUser().loginAnonymousIfNoUser()
+            } else if ("anonymous-view".equals(requireAuthentication)) {
+                ec.artifactExecution.setAnonymousAuthorizedView()
+                loggedInAnonymous = ec.getUser().loginAnonymousIfNoUser()
+            }
+
+            try {
+                Map result = ec.getService().sync().name(serviceName).parameters(ec.context).call()
+                return new RestResult(result, null)
+            } finally {
+                if (loggedInAnonymous) ((UserFacadeImpl) ec.getUser()).logoutAnonymousOnly()
+            }
         }
 
         void addToSwaggerMap(Map<String, Object> swaggerMap, Map<String, Map<String, Object>> resourceMap) {
-            ServiceDefinition sd = ecfi.getServiceFacade().getServiceDefinition(serviceName)
+            ServiceDefinition sd = ecfi.serviceFacade.getServiceDefinition(serviceName)
             if (sd == null) throw new IllegalArgumentException("Service ${serviceName} not found")
-            MNode serviceNode = sd.getServiceNode()
+            MNode serviceNode = sd.serviceNode
             Map definitionsMap = (Map) swaggerMap.definitions
 
             // add parameters, including path parameters
@@ -204,16 +255,16 @@ class RestApi {
             Set<String> remainingInParmNames = new LinkedHashSet<String>(sd.getInParameterNames())
             for (String pathParm in pathNode.pathParameters) {
                 MNode parmNode = sd.getInParameter(pathParm)
-                if (parmNode == null) throw new IllegalArgumentException("No in parameter found for path parameter ${pathParm} in service ${sd.getServiceName()}")
+                if (parmNode == null) throw new IllegalArgumentException("No in parameter found for path parameter ${pathParm} in service ${sd.serviceName}")
                 parameters.add([name:pathParm, in:'path', required:true, type:getJsonType((String) parmNode?.attribute('type')),
                                 description:parmNode.first("description")?.text])
                 remainingInParmNames.remove(pathParm)
             }
             if (remainingInParmNames) {
                 if (method in ['post', 'put', 'patch']) {
-                    parameters.add([name:'body', in:'body', required:true, schema:['$ref':"#/definitions/${sd.getServiceName()}.In".toString()]])
+                    parameters.add([name:'body', in:'body', required:true, schema:['$ref':"#/definitions/${sd.serviceName}.In".toString()]])
                     // add a definition for service in parameters
-                    definitionsMap.put("${sd.getServiceName()}.In".toString(), sd.getJsonSchemaMapIn())
+                    definitionsMap.put("${sd.serviceName}.In".toString(), RestSchemaUtil.getJsonSchemaMapIn(sd))
                 } else {
                     for (String parmName in remainingInParmNames) {
                         MNode parmNode = sd.getInParameter(parmName)
@@ -226,7 +277,7 @@ class RestApi {
                                 type:jsonType, format:getJsonFormat(javaType),
                                 description:parmNode.first("description")?.text] as Map<String, Object>
                         parameters.add(propMap)
-                        sd.addParameterEnums(parmNode, propMap)
+                        RestSchemaUtil.addParameterEnums(sd, parmNode, propMap)
                     }
 
                 }
@@ -236,8 +287,8 @@ class RestApi {
             Map responses = ["401":[description:"Authentication required"], "403":[description:"Access Forbidden (no authz)"],
                              "429":[description:"Too Many Requests (tarpit)"], "500":[description:"General Error"]]
             if (sd.getOutParameterNames().size() > 0) {
-                responses.put("200", [description:'Success', schema:['$ref':"#/definitions/${sd.getServiceName()}.Out".toString()]])
-                definitionsMap.put("${sd.getServiceName()}.Out".toString(), sd.getJsonSchemaMapOut())
+                responses.put("200", [description:'Success', schema:['$ref':"#/definitions/${sd.serviceName}.Out".toString()]])
+                definitionsMap.put("${sd.serviceName}.Out".toString(), RestSchemaUtil.getJsonSchemaMapOut(sd))
             }
 
             Map curMap = [:]
@@ -249,9 +300,9 @@ class RestApi {
         }
 
         Map<String, Object> getRamlMap(Map<String, Object> typesMap) {
-            ServiceDefinition sd = ecfi.getServiceFacade().getServiceDefinition(serviceName)
+            ServiceDefinition sd = ecfi.serviceFacade.getServiceDefinition(serviceName)
             if (sd == null) throw new IllegalArgumentException("Service ${serviceName} not found")
-            MNode serviceNode = sd.getServiceNode()
+            MNode serviceNode = sd.serviceNode
 
             Map<String, Object> ramlMap =  [is:['service'],
                     displayName:(serviceNode.attribute("displayName") ?: "${sd.verb} ${sd.noun}".toString())] as Map<String, Object>
@@ -260,14 +311,14 @@ class RestApi {
             Set<String> remainingInParmNames = new LinkedHashSet<String>(sd.getInParameterNames())
             for (String pathParm in pathNode.pathParameters) remainingInParmNames.remove(pathParm)
             if (remainingInParmNames) {
-                ramlMap.put("body", ['application/json': [type:"${sd.getServiceName()}.In".toString()]])
+                ramlMap.put("body", ['application/json': [type:"${sd.serviceName}.In".toString()]])
                 // add a definition for service in parameters
-                typesMap.put("${sd.getServiceName()}.In".toString(), sd.getRamlMapIn())
+                typesMap.put("${sd.serviceName}.In".toString(), RestSchemaUtil.getRamlMapIn(sd))
             }
 
             if (sd.getOutParameterNames().size() > 0) {
-                ramlMap.put("responses", [200:[body:['application/json': [type:"${sd.getServiceName()}.Out".toString()]]]])
-                typesMap.put("${sd.getServiceName()}.Out".toString(), sd.getRamlMapOut())
+                ramlMap.put("responses", [200:[body:['application/json': [type:"${sd.serviceName}.Out".toString()]]]])
+                typesMap.put("${sd.serviceName}.Out".toString(), RestSchemaUtil.getRamlMapOut(sd))
             }
 
             return ramlMap
@@ -281,65 +332,79 @@ class RestApi {
 
     static class MethodEntity extends MethodHandler {
         String entityName, masterName, operation
-        MethodEntity(String method, MNode entityNode, PathNode pathNode, ExecutionContextFactoryImpl ecfi) {
-            super(method, pathNode, ecfi)
+        MethodEntity(MNode methodNode, MNode entityNode, PathNode pathNode, ExecutionContextFactoryImpl ecfi) {
+            super(methodNode, pathNode, ecfi)
             entityName = entityNode.attribute("name")
             masterName = entityNode.attribute("masterName")
             operation = entityNode.attribute("operation")
         }
         RestResult run(List<String> pathList, ExecutionContext ec) {
             // service calls handle their own auth, for entity ops authc always required
-            if (!ec.getUser().getUsername()) {
+            if ((requireAuthentication == null || requireAuthentication.length() == 0 || "true".equals(requireAuthentication)) &&
+                    !ec.getUser().getUsername()) {
                 throw new AuthenticationRequiredException("User must be logged in for operaton ${operation} on entity ${entityName}")
             }
 
-            if (operation == 'one') {
-                EntityFind ef = ec.entity.find(entityName).searchFormMap(ec.context, null, false)
-                if (masterName) {
-                    return new RestResult(ef.oneMaster(masterName), null)
-                } else {
-                    return new RestResult(ef.one(), null)
-                }
-            } else if (operation == 'list') {
-                EntityFind ef = ec.entity.find(entityName).searchFormMap(ec.context, null, false)
-                // we don't want to go overboard with these requests, never do an unlimited find, if no limit use 100
-                if (!ef.getLimit()) ef.limit(100)
+            boolean loggedInAnonymous = false
+            if ("anonymous-all".equals(requireAuthentication)) {
+                ec.artifactExecution.setAnonymousAuthorizedAll()
+                loggedInAnonymous = ec.getUser().loginAnonymousIfNoUser()
+            } else if ("anonymous-view".equals(requireAuthentication)) {
+                ec.artifactExecution.setAnonymousAuthorizedView()
+                loggedInAnonymous = ec.getUser().loginAnonymousIfNoUser()
+            }
 
-                int count = ef.count() as int
-                int pageIndex = ef.getPageIndex()
-                int pageSize = ef.getPageSize()
-                int pageMaxIndex = ((count - 1) as BigDecimal).divide(pageSize as BigDecimal, 0, BigDecimal.ROUND_DOWN).intValue()
-                int pageRangeLow = pageIndex * pageSize + 1
-                int pageRangeHigh = (pageIndex * pageSize) + pageSize
-                if (pageRangeHigh > count) pageRangeHigh = count
-                Map<String, Object> headers = ['X-Total-Count':count, 'X-Page-Index':pageIndex, 'X-Page-Size':pageSize,
-                    'X-Page-Max-Index':pageMaxIndex, 'X-Page-Range-Low':pageRangeLow, 'X-Page-Range-High':pageRangeHigh] as Map<String, Object>
+            try {
+                if (operation == 'one') {
+                    EntityFind ef = ec.entity.find(entityName).searchFormMap(ec.context, null, null, false)
+                    if (masterName) {
+                        return new RestResult(ef.oneMaster(masterName), null)
+                    } else {
+                        return new RestResult(ef.one(), null)
+                    }
+                } else if (operation == 'list') {
+                    EntityFind ef = ec.entity.find(entityName).searchFormMap(ec.context, null, null, false)
+                    // we don't want to go overboard with these requests, never do an unlimited find, if no limit use 100
+                    if (!ef.getLimit()) ef.limit(100)
 
-                if (masterName) {
-                    return new RestResult(ef.listMaster(masterName), headers)
+                    int count = ef.count() as int
+                    int pageIndex = ef.getPageIndex()
+                    int pageSize = ef.getPageSize()
+                    int pageMaxIndex = ((count - 1) as BigDecimal).divide(pageSize as BigDecimal, 0, BigDecimal.ROUND_DOWN).intValue()
+                    int pageRangeLow = pageIndex * pageSize + 1
+                    int pageRangeHigh = (pageIndex * pageSize) + pageSize
+                    if (pageRangeHigh > count) pageRangeHigh = count
+                    Map<String, Object> headers = ['X-Total-Count':count, 'X-Page-Index':pageIndex, 'X-Page-Size':pageSize,
+                        'X-Page-Max-Index':pageMaxIndex, 'X-Page-Range-Low':pageRangeLow, 'X-Page-Range-High':pageRangeHigh] as Map<String, Object>
+
+                    if (masterName) {
+                        return new RestResult(ef.listMaster(masterName), headers)
+                    } else {
+                        return new RestResult(ef.list(), headers)
+                    }
+                } else if (operation == 'count') {
+                    EntityFind ef = ec.entity.find(entityName).searchFormMap(ec.context, null, null, false)
+                    long count = ef.count()
+                    Map<String, Object> headers = ['X-Total-Count':count] as Map<String, Object>
+                    return new RestResult([count:count], headers)
+                } else if (operation in ['create', 'update', 'store', 'delete']) {
+                    Map result = ec.getService().sync().name(operation, entityName).parameters(ec.context).call()
+                    return new RestResult(result, null)
                 } else {
-                    return new RestResult(ef.list(), headers)
+                    throw new IllegalArgumentException("Entity operation ${operation} not supported, must be one of: one, list, count, create, update, store, delete")
                 }
-            } else if (operation == 'count') {
-                EntityFind ef = ec.entity.find(entityName).searchFormMap(ec.context, null, false)
-                long count = ef.count()
-                Map<String, Object> headers = ['X-Total-Count':count] as Map<String, Object>
-                return new RestResult([count:count], headers)
-            } else if (operation in ['create', 'update', 'store', 'delete']) {
-                Map result = ec.getService().sync().name(operation, entityName).parameters(ec.context).call()
-                return new RestResult(result, null)
-            } else {
-                throw new IllegalArgumentException("Entity operation ${operation} not supported, must be one of: one, list, count, create, update, store, delete")
+            } finally {
+                if (loggedInAnonymous) ((UserFacadeImpl) ec.getUser()).logoutAnonymousOnly()
             }
         }
 
         void addToSwaggerMap(Map<String, Object> swaggerMap, Map<String, Map<String, Object>> resourceMap) {
-            EntityDefinition ed = ecfi.getEntityFacade().getEntityDefinition(entityName)
+            EntityDefinition ed = ecfi.entityFacade.getEntityDefinition(entityName)
             if (ed == null) throw new IllegalArgumentException("Entity ${entityName} not found")
             // Node entityNode = ed.getEntityNode()
 
             Map definitionsMap = ((Map) swaggerMap.definitions)
-            String refDefName = ed.getShortAlias() ?: ed.getFullEntityName()
+            String refDefName = ed.getShortOrFullEntityName()
             if (masterName) refDefName = refDefName + "." + masterName
             String refDefNamePk = refDefName + ".PK"
 
@@ -347,9 +412,9 @@ class RestApi {
             List<Map> parameters = []
             ArrayList<String> remainingPkFields = new ArrayList<String>(ed.getPkFieldNames())
             for (String pathParm in pathNode.pathParameters) {
-                EntityJavaUtil.FieldInfo fi = ed.getFieldInfo(pathParm)
+                FieldInfo fi = ed.getFieldInfo(pathParm)
                 if (fi == null) throw new IllegalArgumentException("No field found for path parameter ${pathParm} in entity ${ed.getFullEntityName()}")
-                parameters.add([name:pathParm, in:'path', required:true, type:(EntityDefinition.fieldTypeJsonMap.get(fi.type) ?: "string"),
+                parameters.add([name:pathParm, in:'path', required:true, type:(RestSchemaUtil.fieldTypeJsonMap.get(fi.type) ?: "string"),
                                 description:fi.fieldNode.first("description")?.text])
                 remainingPkFields.remove(pathParm)
             }
@@ -364,32 +429,32 @@ class RestApi {
             if (operation  == 'one') {
                 if (remainingPkFields) {
                     for (String fieldName in remainingPkFields) {
-                        EntityJavaUtil.FieldInfo fi = ed.getFieldInfo(fieldName)
+                        FieldInfo fi = ed.getFieldInfo(fieldName)
                         Map<String, Object> fieldMap = [name:fieldName, in:'query', required:false,
-                                type:(EntityDefinition.fieldTypeJsonMap.get(fi.type) ?: "string"),
-                                format:(EntityDefinition.fieldTypeJsonFormatMap.get(fi.type) ?: ""),
+                                type:(RestSchemaUtil.fieldTypeJsonMap.get(fi.type) ?: "string"),
+                                format:(RestSchemaUtil.fieldTypeJsonFormatMap.get(fi.type) ?: ""),
                                 description:fi.fieldNode.first("description")?.text] as Map<String, Object>
                         parameters.add(fieldMap)
-                        List enumList = ed.getFieldEnums(fi)
+                        List enumList = RestSchemaUtil.getFieldEnums(ed, fi)
                         if (enumList) fieldMap.put('enum', enumList)
                     }
                 }
                 responses.put("200", [description:'Success', schema:['$ref':"#/definitions/${refDefName}".toString()]])
             } else if (operation == 'list') {
-                parameters.addAll(EntityDefinition.swaggerPaginationParameters)
-                for (String fieldName in ed.getAllFieldNames(false)) {
+                parameters.addAll(RestSchemaUtil.swaggerPaginationParameters)
+                for (String fieldName in ed.getAllFieldNames()) {
                     if (fieldName in pathNode.pathParameters) continue
-                    EntityJavaUtil.FieldInfo fi = ed.getFieldInfo(fieldName)
+                    FieldInfo fi = ed.getFieldInfo(fieldName)
                     parameters.add([name:fieldName, in:'query', required:false,
-                                        type:(EntityDefinition.fieldTypeJsonMap.get(fi.type) ?: "string"),
-                                        format:(EntityDefinition.fieldTypeJsonFormatMap.get(fi.type) ?: ""),
+                                        type:(RestSchemaUtil.fieldTypeJsonMap.get(fi.type) ?: "string"),
+                                        format:(RestSchemaUtil.fieldTypeJsonFormatMap.get(fi.type) ?: ""),
                                         description:fi.fieldNode.first("description")?.text])
                 }
                 // parameters.add([name:'body', in:'body', required:false, schema:[allOf:[['$ref':'#/definitions/paginationParameters'], ['$ref':"#/definitions/${refDefName}"]]]])
                 responses.put("200", [description:'Success', schema:[type:"array", items:['$ref':"#/definitions/${refDefName}".toString()]]])
             } else if (operation == 'count') {
                 parameters.add([name:'body', in:'body', required:false, schema:['$ref':"#/definitions/${refDefName}".toString()]])
-                responses.put("200", [description:'Success', schema:EntityDefinition.jsonCountParameters])
+                responses.put("200", [description:'Success', schema:RestSchemaUtil.jsonCountParameters])
             } else if (operation in ['create', 'update', 'store']) {
                 parameters.add([name:'body', in:'body', required:false, schema:['$ref':"#/definitions/${refDefName}".toString()]])
                 responses.put("200", [description:'Success', schema:['$ref':"#/definitions/${refDefNamePk}".toString()]])
@@ -403,7 +468,7 @@ class RestApi {
             }
 
             Map curMap = [:]
-            String summary = "${operation} ${ed.getEntityName()}"
+            String summary = "${operation} ${ed.entityInfo.internalEntityName}"
             if (masterName) summary = summary + " (master: " + masterName + ")"
             if (swaggerMap.tags && pathNode.fullPathList.size() > 1) curMap.put("tags", [pathNode.fullPathList[1]])
             curMap.putAll([summary:summary, description:ed.getEntityNode().first("description")?.text,
@@ -411,17 +476,17 @@ class RestApi {
             resourceMap.put(method, curMap)
 
             // add a definition for entity fields
-            if (addEntityDef) definitionsMap.put(refDefName, ed.getJsonSchema(false, false, definitionsMap, null, null, null, false, masterName, null))
-            if (addPkDef) definitionsMap.put(refDefNamePk, ed.getJsonSchema(true, false, null, null, null, null, false, masterName, null))
+            if (addEntityDef) definitionsMap.put(refDefName, RestSchemaUtil.getJsonSchema(ed, false, false, definitionsMap, null, null, null, false, masterName, null))
+            if (addPkDef) definitionsMap.put(refDefNamePk, RestSchemaUtil.getJsonSchema(ed, true, false, null, null, null, null, false, masterName, null))
         }
 
         Map<String, Object> getRamlMap(Map<String, Object> typesMap) {
             Map<String, Object> ramlMap = null
 
-            EntityDefinition ed = ecfi.getEntityFacade().getEntityDefinition(entityName)
+            EntityDefinition ed = ecfi.entityFacade.getEntityDefinition(entityName)
             if (ed == null) throw new IllegalArgumentException("Entity ${entityName} not found")
 
-            String refDefName = ed.getShortAlias() ?: ed.getFullEntityName()
+            String refDefName = ed.getShortOrFullEntityName()
             if (masterName) refDefName = refDefName + "." + masterName
 
             String prettyName = ed.getPrettyName(null, null)
@@ -433,14 +498,14 @@ class RestApi {
             }
             Map pkQpMap = [:]
             for (int i = 0; i < remainingPkFields.size(); i++) {
-                EntityJavaUtil.FieldInfo fi = ed.getFieldInfo(remainingPkFields.get(i))
-                pkQpMap.put(fi.name, ed.getRamlFieldMap(fi))
+                FieldInfo fi = ed.getFieldInfo(remainingPkFields.get(i))
+                pkQpMap.put(fi.name, RestSchemaUtil.getRamlFieldMap(ed, fi))
             }
             Map allQpMap = [:]
-            ArrayList<String> allFields = ed.getAllFieldNames(true)
+            ArrayList<String> allFields = ed.getAllFieldNames()
             for (int i = 0; i < allFields.size(); i++) {
-                EntityJavaUtil.FieldInfo fi = ed.getFieldInfo(allFields.get(i))
-                allQpMap.put(fi.name, ed.getRamlFieldMap(fi))
+                FieldInfo fi = ed.getFieldInfo(allFields.get(i))
+                allQpMap.put(fi.name, RestSchemaUtil.getRamlFieldMap(ed, fi))
             }
 
             boolean addEntityDef = true
@@ -454,7 +519,7 @@ class RestApi {
                 ramlMap.put("responses", [200:[body:['application/json': [type:"array", items:refDefName]]]])
             } else if (operation == 'count') {
                 ramlMap = [is:['entity'], displayName:"Count ${prettyName}".toString(), body:['application/json': [type:refDefName]]] as Map<String, Object>
-                ramlMap.put("responses", [200:[body:['application/json': EntityDefinition.jsonCountParameters]]])
+                ramlMap.put("responses", [200:[body:['application/json': RestSchemaUtil.jsonCountParameters]]])
             } else if (operation  == 'create') {
                 ramlMap = [is:['entity'], displayName:"Create ${prettyName}".toString(), body:['application/json': [type:refDefName]]] as Map<String, Object>
                 if (pkQpMap) ramlMap.put("responses", [200:[body:['application/json': [type:'object', properties:pkQpMap]]]])
@@ -468,7 +533,7 @@ class RestApi {
                 if (pkQpMap) ramlMap.put('queryParameters', pkQpMap)
                 addEntityDef = false
             }
-            if (addEntityDef) ed.getRamlTypeMap(false, typesMap, masterName, null)
+            if (addEntityDef) RestSchemaUtil.getRamlTypeMap(ed, false, typesMap, masterName, null)
 
             return ramlMap
         }
@@ -491,6 +556,7 @@ class RestApi {
         Map<String, ResourceNode> resourceMap = [:]
 
         String name
+        String requireAuthentication
         PathNode parent
         List<String> fullPathList = []
         Set<String> pathParameters = new LinkedHashSet<String>()
@@ -505,12 +571,14 @@ class RestApi {
             displayName = node.attribute("displayName")
             description = node.attribute("description")
             version = node.attribute("version")
+            if (version && version.contains('${')) version = SystemBinding.expand(version)
 
             if (parent != null) this.pathParameters.addAll(parent.pathParameters)
             name = node.attribute("name")
             if (parent != null) fullPathList.addAll(parent.fullPathList)
             fullPathList.add(isId ? "{${name}}".toString() : name)
             if (isId) pathParameters.add(name)
+            requireAuthentication = node.attribute("require-authentication") ?: parent?.requireAuthentication ?: "true"
 
             for (MNode childNode in node.children) {
                 if (childNode.name == "method") {
@@ -518,9 +586,9 @@ class RestApi {
 
                     MNode methodNode = childNode.children[0]
                     if (methodNode.name == "service") {
-                        methodMap.put(method, new MethodService(method, methodNode, this, ecfi))
+                        methodMap.put(method, new MethodService(childNode, methodNode, this, ecfi))
                     } else if (methodNode.name == "entity") {
-                        methodMap.put(method, new MethodEntity(method, methodNode, this, ecfi))
+                        methodMap.put(method, new MethodEntity(childNode, methodNode, this, ecfi))
                     }
                 } else if (childNode.name == "resource") {
                     ResourceNode resourceNode = new ResourceNode(childNode, this, ecfi)
@@ -557,9 +625,21 @@ class RestApi {
 
             // push onto artifact stack, check authz
             String curPath = getFullPathName([])
-            ArtifactExecutionInfoImpl aei = new ArtifactExecutionInfoImpl(curPath, ArtifactExecutionInfo.AT_REST_PATH, getActionFromMethod(ec))
+            ArtifactExecutionInfoImpl aei = new ArtifactExecutionInfoImpl(curPath, ArtifactExecutionInfo.AT_REST_PATH, getActionFromMethod(ec), null)
+            // for now don't track/count artifact hits for REST path
+            aei.setTrackArtifactHit(false)
             // NOTE: consider setting parameters on aei, but don't like setting entire context, currently used for entity/service calls
-            ec.getArtifactExecutionImpl().pushInternal(aei, !moreInPath)
+            ec.artifactExecutionFacade.pushInternal(aei, !moreInPath ?
+                    (requireAuthentication == null || requireAuthentication.length() == 0 || "true".equals(requireAuthentication)) : false)
+
+            boolean loggedInAnonymous = false
+            if ("anonymous-all".equals(requireAuthentication)) {
+                ec.artifactExecutionFacade.setAnonymousAuthorizedAll()
+                loggedInAnonymous = ec.userFacade.loginAnonymousIfNoUser()
+            } else if ("anonymous-view".equals(requireAuthentication)) {
+                ec.artifactExecutionFacade.setAnonymousAuthorizedView()
+                loggedInAnonymous = ec.userFacade.loginAnonymousIfNoUser()
+            }
 
             try {
                 if (moreInPath) {
@@ -579,7 +659,8 @@ class RestApi {
                     return runByMethod(pathList, ec)
                 }
             } finally {
-                ec.getArtifactExecution().pop(aei)
+                ec.artifactExecutionFacade.pop(aei)
+                if (loggedInAnonymous) ec.userFacade.logoutAnonymousOnly()
             }
         }
 

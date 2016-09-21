@@ -39,17 +39,14 @@ class ServiceCallAsyncImpl extends ServiceCallImpl implements ServiceCallAsync {
     }
 
     @Override
-    ServiceCallAsync name(String serviceName) { this.setServiceName(serviceName); return this }
-
+    ServiceCallAsync name(String serviceName) { serviceNameInternal(serviceName); return this }
     @Override
-    ServiceCallAsync name(String v, String n) { path = null; verb = v; noun = n; return this }
-
+    ServiceCallAsync name(String v, String n) { serviceNameInternal(null, v, n); return this }
     @Override
-    ServiceCallAsync name(String p, String v, String n) { path = p; verb = v; noun = n; return this }
+    ServiceCallAsync name(String p, String v, String n) { serviceNameInternal(p, v, n); return this }
 
     @Override
     ServiceCallAsync parameters(Map<String, ?> map) { parameters.putAll(map); return this }
-
     @Override
     ServiceCallAsync parameter(String name, Object value) { parameters.put(name, value); return this }
 
@@ -58,7 +55,7 @@ class ServiceCallAsyncImpl extends ServiceCallImpl implements ServiceCallAsync {
 
     @Override
     void call() {
-        ExecutionContextFactoryImpl ecfi = sfi.getEcfi()
+        ExecutionContextFactoryImpl ecfi = sfi.ecfi
         ExecutionContextImpl eci = ecfi.getEci()
         validateCall(eci)
 
@@ -72,75 +69,43 @@ class ServiceCallAsyncImpl extends ServiceCallImpl implements ServiceCallAsync {
 
     @Override
     Future<Map<String, Object>> callFuture() throws ServiceException {
-        ExecutionContextFactoryImpl ecfi = sfi.getEcfi()
+        ExecutionContextFactoryImpl ecfi = sfi.ecfi
         ExecutionContextImpl eci = ecfi.getEci()
         validateCall(eci)
 
         AsyncServiceCallable callable = new AsyncServiceCallable(eci, serviceName, parameters)
-        if (distribute && sfi.distributedExecutorService) {
+        if (distribute && sfi.distributedExecutorService != null) {
             return sfi.distributedExecutorService.submit(callable)
         } else {
             return ecfi.workerPool.submit(callable)
         }
     }
 
-    void validateCall(ExecutionContextImpl eci) {
-        // Before scheduling the service check a few basic things so they show up sooner than later:
-        ServiceDefinition sd = sfi.getServiceDefinition(getServiceName())
-        if (sd == null && !isEntityAutoPattern()) throw new IllegalArgumentException("Could not find service with name [${getServiceName()}]")
-
-        if (sd != null) {
-            String serviceType = (String) sd.serviceNode.attribute('type') ?: "inline"
-            if (serviceType == "interface") throw new IllegalArgumentException("Cannot run interface service [${getServiceName()}]")
-            ServiceRunner sr = sfi.getServiceRunner(serviceType)
-            if (sr == null) throw new IllegalArgumentException("Could not find service runner for type [${serviceType}] for service [${getServiceName()}]")
-            // validation
-            sd.convertValidateCleanParameters(this.parameters, eci)
-            // if error(s) in parameters, return now with no results
-            if (eci.getMessage().hasError()) return
-        }
-
-        // always do an authz before scheduling the job
-        ArtifactExecutionInfoImpl aei = new ArtifactExecutionInfoImpl(getServiceName(),
-                ArtifactExecutionInfo.AT_SERVICE, ServiceDefinition.getVerbAuthzActionEnum(verb))
-        eci.getArtifactExecutionImpl().pushInternal(aei, (sd != null && sd.getAuthenticate() == "true"))
-        // pop immediately, just did the push to to an authz
-        eci.getArtifactExecution().pop(aei)
-
-        parameters.authUsername = eci.getUser().getUsername()
-        parameters.authTenantId = eci.getTenantId()
-
-        // logger.warn("=========== async call ${serviceName}, parameters: ${parameters}")
-    }
-
     @Override
     Runnable getRunnable() {
-        return new AsyncServiceRunnable(sfi.getEcfi().getEci(), serviceName, parameters)
+        return new AsyncServiceRunnable(sfi.ecfi.getEci(), serviceName, parameters)
     }
 
     @Override
     Callable<Map<String, Object>> getCallable() {
-        return new AsyncServiceCallable(sfi.getEcfi().getEci(), serviceName, parameters)
+        return new AsyncServiceCallable(sfi.ecfi.getEci(), serviceName, parameters)
     }
 
     static class AsyncServiceInfo implements Externalizable {
         transient ExecutionContextFactoryImpl ecfi
-        String threadTenantId
         String threadUsername
         String serviceName
         Map<String, Object> parameters
 
         AsyncServiceInfo(ExecutionContextImpl eci, String serviceName, Map<String, Object> parameters) {
             ecfi = eci.ecfi
-            threadTenantId = eci.tenantId
-            threadUsername = eci.user.username
+            threadUsername = eci.userFacade.username
             this.serviceName = serviceName
             this.parameters = new HashMap<>(parameters)
         }
 
         @Override
         void writeExternal(ObjectOutput out) throws IOException {
-            out.writeUTF(threadTenantId) // never null
             out.writeObject(threadUsername) // might be null
             out.writeUTF(serviceName) // never null
             out.writeObject(parameters)
@@ -148,7 +113,6 @@ class ServiceCallAsyncImpl extends ServiceCallImpl implements ServiceCallAsync {
 
         @Override
         void readExternal(ObjectInput objectInput) throws IOException, ClassNotFoundException {
-            threadTenantId = objectInput.readUTF()
             threadUsername = (String) objectInput.readObject()
             serviceName = objectInput.readUTF()
             parameters = (Map<String, Object>) objectInput.readObject()
@@ -163,12 +127,11 @@ class ServiceCallAsyncImpl extends ServiceCallImpl implements ServiceCallAsync {
             ExecutionContextImpl threadEci = (ExecutionContextImpl) null
             try {
                 threadEci = getEcfi().getEci()
-                threadEci.changeTenant(threadTenantId)
                 if (threadUsername != null && threadUsername.length() > 0)
-                    threadEci.userFacade.internalLoginUser(threadUsername, threadTenantId)
+                    threadEci.userFacade.internalLoginUser(threadUsername)
 
                 // NOTE: authz is disabled because authz is checked before queueing
-                Map<String, Object> result = threadEci.service.sync().name(serviceName).parameters(parameters).disableAuthz().call()
+                Map<String, Object> result = threadEci.serviceFacade.sync().name(serviceName).parameters(parameters).disableAuthz().call()
                 return result
             } catch (Throwable t) {
                 logger.error("Error in async service", t)

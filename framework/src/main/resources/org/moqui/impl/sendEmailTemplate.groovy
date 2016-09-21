@@ -33,7 +33,6 @@ import javax.xml.transform.stream.StreamSource
 Logger logger = LoggerFactory.getLogger("org.moqui.impl.sendEmailTemplate")
 
 try {
-
     ExecutionContextImpl ec = context.ec
 
     // logger.info("sendEmailTemplate with emailTemplateId [${emailTemplateId}], bodyParameters [${bodyParameters}]")
@@ -42,7 +41,7 @@ try {
     if (bodyParameters) context.putAll(bodyParameters)
 
     def emailTemplate = ec.entity.find("moqui.basic.email.EmailTemplate").condition("emailTemplateId", emailTemplateId).one()
-    if (!emailTemplate) ec.message.addError(ec.resource.expand('No EmailTemplate record found for ID [${emailTemplateId}]',''))
+    if (emailTemplate == null) ec.message.addError(ec.resource.expand('No EmailTemplate record found for ID [${emailTemplateId}]',''))
     if (ec.message.hasError()) return
 
     // combine ccAddresses and bccAddresses
@@ -81,7 +80,7 @@ try {
     }
 
     def emailTemplateAttachmentList = emailTemplate."moqui.basic.email.EmailTemplateAttachment"
-    def emailServer = emailTemplate."moqui.basic.email.EmailServer"
+    emailServer = emailTemplate."moqui.basic.email.EmailServer"
 
     // check a couple of required fields
     if (!emailServer) ec.message.addError(ec.resource.expand('No EmailServer record found for EmailTemplate [${emailTemplateId}]',''))
@@ -150,10 +149,14 @@ try {
                     .webappName((String) emailTemplate.webappName).renderMode((String) emailTemplateAttachment.screenRenderMode)
             String attachmentText = attachmentRender.render()
             if (emailTemplateAttachment.screenRenderMode == "xsl-fo") {
-                // use FOP to change to PDF, then attach that
-                ByteArrayOutputStream baos = new ByteArrayOutputStream()
-                ec.resource.xslFoTransform(new StreamSource(new StringReader(attachmentText)), null, baos, "application/pdf")
-                email.attach(new ByteArrayDataSource(baos.toByteArray(), "application/pdf"), (String) emailTemplateAttachment.fileName, "")
+                // use ResourceFacade.xslFoTransform() to change to PDF, then attach that
+                try {
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream()
+                    ec.resource.xslFoTransform(new StreamSource(new StringReader(attachmentText)), null, baos, "application/pdf")
+                    email.attach(new ByteArrayDataSource(baos.toByteArray(), "application/pdf"), (String) emailTemplateAttachment.fileName, "")
+                } catch (Exception e) {
+                    logger.warn("Error generating PDF from XSL-FO: ${e.toString()}")
+                }
             } else {
                 String mimeType = ec.screen.getMimeTypeByMode(emailTemplateAttachment.screenRenderMode)
                 DataSource dataSource = new ByteArrayDataSource(attachmentText, mimeType)
@@ -173,9 +176,11 @@ try {
     messageId = email.send()
 
     if (emailMessageId) {
-        Map uemParms = [emailMessageId:emailMessageId, statusId:"ES_SENT", messageId:messageId]
-        ec.service.sync().name("update", "moqui.basic.email.EmailMessage").parameters(uemParms).disableAuthz().call()
+        ec.service.sync().name("update", "moqui.basic.email.EmailMessage")
+                .parameters([emailMessageId:emailMessageId, statusId:"ES_SENT", messageId:messageId]).disableAuthz().call()
     }
+
+    return
 } catch (Throwable t) {
     logger.info("Error in sendEmailTemplate groovy", t)
     throw new BaseException("Error in sendEmailTemplate", t)
