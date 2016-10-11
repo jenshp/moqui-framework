@@ -73,6 +73,7 @@ public class StupidJavaUtilities {
      *   0 length String (actually CharSequence to include GString, etc), and 0 size Collection/Map are considered empty. */
     public static boolean isEmpty(Object obj) {
         if (obj == null) return true;
+        /* faster not to do this
         Class objClass = obj.getClass();
         // some common direct classes
         if (objClass == String.class) return ((String) obj).length() == 0;
@@ -81,6 +82,7 @@ public class StupidJavaUtilities {
         if (objClass == HashMap.class) return ((HashMap) obj).size() == 0;
         if (objClass == LinkedHashMap.class) return ((HashMap) obj).size() == 0;
         // hopefully less common sub-classes
+        */
         if (obj instanceof CharSequence) return ((CharSequence) obj).length() == 0;
         if (obj instanceof Collection) return ((Collection) obj).size() == 0;
         return obj instanceof Map && ((Map) obj).size() == 0;
@@ -172,6 +174,51 @@ public class StupidJavaUtilities {
             return null;
         }
     }
+
+    @SuppressWarnings("unchecked")
+    public static void mergeNestedMap(Map<Object, Object> baseMap, Map<Object, Object> overrideMap, boolean overrideEmpty) {
+        if (baseMap == null || overrideMap == null) return;
+        Iterator<Map.Entry<Object, Object>> mapIter = overrideMap.entrySet().iterator();
+        while (mapIter.hasNext()) {
+            Map.Entry entry = mapIter.next();
+            Object key = entry.getKey();
+            Object value = entry.getValue();
+            if (baseMap.containsKey(key)) {
+                if (value == null) {
+                    if (overrideEmpty) baseMap.put(key, null);
+                } else {
+                    if (value instanceof CharSequence) {
+                        if (overrideEmpty || ((CharSequence) value).length() > 0) baseMap.put(key, value);
+                    } else if (value instanceof Map) {
+                        Object baseValue = baseMap.get(key);
+                        if (baseValue != null && baseValue instanceof Map) {
+                            mergeNestedMap((Map) baseValue, (Map) value, overrideEmpty);
+                        } else {
+                            baseMap.put(key, value);
+                        }
+                    } else if (value instanceof Collection) {
+                        Object baseValue = baseMap.get(key);
+                        if (baseValue != null && baseValue instanceof Collection) {
+                            Collection baseCol = (Collection) baseValue;
+                            Collection overrideCol = (Collection) value;
+                            for (Object overrideObj : overrideCol) {
+                                // NOTE: if we have a Collection of Map we have no way to merge the Maps without knowing the 'key' entries to use to match them
+                                if (!baseCol.contains(overrideObj)) baseCol.add(overrideObj);
+                            }
+                        } else {
+                            baseMap.put(key, value);
+                        }
+                    } else {
+                        // NOTE: no way to check empty, if not null not empty so put it
+                        baseMap.put(key, value);
+                    }
+                }
+            } else {
+                baseMap.put(key, value);
+            }
+        }
+    }
+
 
 
     public static class MapOrderByComparator implements Comparator<Map> {

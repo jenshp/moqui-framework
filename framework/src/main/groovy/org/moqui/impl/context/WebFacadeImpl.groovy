@@ -17,7 +17,6 @@ import groovy.json.JsonBuilder
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
 
-import org.apache.commons.codec.binary.Base64
 import org.apache.commons.fileupload.FileItem
 import org.apache.commons.fileupload.FileItemFactory
 import org.apache.commons.fileupload.disk.DiskFileItemFactory
@@ -28,19 +27,14 @@ import org.moqui.entity.EntityValueNotFoundException
 import org.moqui.impl.StupidUtilities
 import org.moqui.impl.StupidWebUtilities
 import org.moqui.impl.context.ExecutionContextFactoryImpl.WebappInfo
-import org.moqui.impl.entity.EntityDefinition
-import org.moqui.impl.entity.EntityFacadeImpl
 import org.moqui.impl.screen.ScreenDefinition
 import org.moqui.impl.screen.ScreenUrlInfo
 import org.moqui.impl.service.RestApi
 import org.moqui.impl.service.ServiceJsonRpcDispatcher
 import org.moqui.impl.service.ServiceXmlRpcDispatcher
 import org.moqui.util.ContextStack
-import org.moqui.util.MNode
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
-import org.yaml.snakeyaml.DumperOptions
-import org.yaml.snakeyaml.Yaml
 
 import javax.servlet.ServletContext
 import javax.servlet.http.HttpServletRequest
@@ -132,7 +126,7 @@ class WebFacadeImpl implements WebFacade {
         // if this is a multi-part request, get the data for it
         if (ServletFileUpload.isMultipartContent(request)) {
             multiPartParameters = new HashMap()
-            FileItemFactory factory = makeDiskFileItemFactory(request.session.getServletContext())
+            FileItemFactory factory = makeDiskFileItemFactory()
             ServletFileUpload upload = new ServletFileUpload(factory)
 
             List<FileItem> items = (List<FileItem>) upload.parseRequest(request)
@@ -174,11 +168,7 @@ class WebFacadeImpl implements WebFacade {
         // create the session token if needed (protection against CSRF/XSRF attacks; see ScreenRenderImpl)
         String sessionToken = session.getAttribute("moqui.session.token")
         if (sessionToken == null || sessionToken.length() == 0) {
-            SecureRandom sr = new SecureRandom()
-            byte[] randomBytes = new byte[20]
-            sr.nextBytes(randomBytes)
-            // TODO: when we move to Java 8 use java.util.Base64
-            sessionToken = Base64.encodeBase64URLSafeString(randomBytes)
+            sessionToken = StupidUtilities.getRandomString(20)
             session.setAttribute("moqui.session.token", sessionToken)
             request.setAttribute("moqui.session.token.created", "true")
         }
@@ -316,7 +306,6 @@ class WebFacadeImpl implements WebFacade {
         return histList
     }
 
-
     @Override
     String getRequestUrl() {
         StringBuilder requestUrl = new StringBuilder()
@@ -439,6 +428,8 @@ class WebFacadeImpl implements WebFacade {
         applicationAttributes = new StupidWebUtilities.ServletContextAttributeMap(getSession().getServletContext())
         return applicationAttributes
     }
+
+    String getWebappMoquiName() { return webappMoquiName }
     @Override
     String getWebappRootUrl(boolean requireFullUrl, Boolean useEncryption) {
         return getWebappRootUrl(this.webappMoquiName, null, requireFullUrl, useEncryption, eci)
@@ -479,16 +470,16 @@ class WebFacadeImpl implements WebFacade {
         return urlValue
     }
     static String makeWebappHost(String webappName, ExecutionContextImpl eci, WebFacade webFacade, boolean requireEncryption) {
-        MNode webappNode = eci.ecfi.getWebappNode(webappName)
+        WebappInfo webappInfo = eci.ecfi.getWebappInfo(webappName)
         // can't get these settings, hopefully a URL from the root will do
-        if (webappNode == null) return ""
+        if (webappInfo == null) return ""
 
         StringBuilder urlBuilder = new StringBuilder()
         HttpServletRequest request = webFacade.getRequest()
-        if (request.getScheme() == "https" || (requireEncryption && webappNode.attribute("https-enabled") != "false")) {
+        if ("https".equals(request.getScheme()) || (requireEncryption && webappInfo.httpsEnabled)) {
             urlBuilder.append("https://")
-            if (webappNode.attribute("https-host")) {
-                urlBuilder.append(webappNode.attribute("https-host"))
+            if (webappInfo.httpsHost != null) {
+                urlBuilder.append(webappInfo.httpsHost)
             } else {
                 if (webFacade != null) {
                     urlBuilder.append(webFacade.getHostName(false))
@@ -497,15 +488,15 @@ class WebFacadeImpl implements WebFacade {
                     urlBuilder.append("localhost")
                 }
             }
-            String httpsPort = webappNode.attribute("https-port")
+            String httpsPort = webappInfo.httpsPort
             // try the local port; this won't work when switching from http to https, conf required for that
-            if (!httpsPort && webFacade != null && request.isSecure())
+            if (httpsPort == null && webFacade != null && request.isSecure())
                 httpsPort = request.getServerPort() as String
             if (httpsPort && httpsPort != "443") urlBuilder.append(":").append(httpsPort)
         } else {
             urlBuilder.append("http://")
-            if (webappNode.attribute("http-host")) {
-                urlBuilder.append(webappNode.attribute("http-host"))
+            if (webappInfo.httpHost != null) {
+                urlBuilder.append(webappInfo.httpHost)
             } else {
                 if (webFacade) {
                     urlBuilder.append(webFacade.getHostName(false))
@@ -515,7 +506,7 @@ class WebFacadeImpl implements WebFacade {
                     logger.trace("No webFacade in place, defaulting to localhost for hostName")
                 }
             }
-            String httpPort = webappNode.attribute("http-port")
+            String httpPort = webappInfo.httpPort
             // try the server port; this won't work when switching from https to http, conf required for that
             if (!httpPort && webFacade != null && !request.isSecure())
                 httpPort = request.getServerPort() as String
@@ -715,13 +706,12 @@ class WebFacadeImpl implements WebFacade {
 
     @Override
     void sendResourceResponse(String location) {
-        sendResourceResponseInternal(location, false, eci, response, requestAttributes)
+        sendResourceResponseInternal(location, false, eci, response)
     }
     void sendResourceResponse(String location, boolean inline) {
-        sendResourceResponseInternal(location, inline, eci, response, requestAttributes)
+        sendResourceResponseInternal(location, inline, eci, response)
     }
-    static void sendResourceResponseInternal(String location, boolean inline, ExecutionContextImpl eci,
-                                             HttpServletResponse response, Map<String, Object> requestAttributes) {
+    static void sendResourceResponseInternal(String location, boolean inline, ExecutionContextImpl eci, HttpServletResponse response) {
         ResourceReference rr = eci.resource.getLocationReference(location)
         if (rr == null) throw new IllegalArgumentException("Resource not found at: ${location}")
         response.setContentType(rr.contentType)
@@ -755,7 +745,7 @@ class WebFacadeImpl implements WebFacade {
     void handleXmlRpcServiceCall() { new ServiceXmlRpcDispatcher(eci).dispatch(request, response) }
 
     @Override
-    void handleJsonRpcServiceCall() { new ServiceJsonRpcDispatcher(eci).dispatch(request, response) }
+    void handleJsonRpcServiceCall() { new ServiceJsonRpcDispatcher(eci).dispatch() }
 
     @Override
     void handleEntityRestCall(List<String> extraPathNameList, boolean masterNameInPath) {
@@ -844,258 +834,6 @@ class WebFacadeImpl implements WebFacade {
         }
     }
 
-    void handleEntityRestSchema(List<String> extraPathNameList, String schemaUri, String linkPrefix,
-                                String schemaLinkPrefix, boolean getMaster) {
-        // make sure a user is logged in, screen/etc that calls will generally be configured to not require auth
-        if (!eci.getUser().getUsername()) {
-            // if there was a login error there will be a MessageFacade error message
-            String errorMessage = eci.message.errorsString
-            if (!errorMessage) errorMessage = "Authentication required for entity REST schema"
-            sendJsonError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
-            return
-        }
-
-        EntityFacadeImpl efi = eci.getEcfi().getEntityFacade()
-
-        if (extraPathNameList.size() == 0) {
-            List allRefList = []
-            Map definitionsMap = [:]
-            definitionsMap.put('paginationParameters', EntityDefinition.jsonPaginationParameters)
-            Map rootMap = ['$schema':'http://json-schema.org/draft-04/hyper-schema#', title:'Moqui Entity REST API',
-                    anyOf:allRefList, definitions:definitionsMap]
-            if (schemaUri) rootMap.put('id', schemaUri)
-
-            Set<String> entityNameSet
-            if (getMaster) {
-                // if getMaster and no entity name in path, just get entities with master definitions
-                entityNameSet = efi.getAllEntityNamesWithMaster()
-            } else {
-                entityNameSet = efi.getAllNonViewEntityNames()
-            }
-            for (String entityName in entityNameSet) {
-                EntityDefinition ed = efi.getEntityDefinition(entityName)
-                String refName = ed.getShortAlias() ?: ed.getFullEntityName()
-                if (getMaster) {
-                    Map<String, EntityDefinition.MasterDefinition> masterDefMap = ed.getMasterDefinitionMap()
-                    Map entityPathMap = [:]
-                    for (String masterName in masterDefMap.keySet()) {
-                        allRefList.add(['$ref':"#/definitions/${refName}/${masterName}"])
-
-                        Map schema = ed.getJsonSchema(false, false, definitionsMap, schemaUri, linkPrefix, schemaLinkPrefix, false, masterName, null)
-                        entityPathMap.put(masterName, schema)
-                    }
-                    definitionsMap.put(refName, entityPathMap)
-                } else {
-                    allRefList.add(['$ref':"#/definitions/${refName}"])
-
-                    Map schema = ed.getJsonSchema(false, false, null, schemaUri, linkPrefix, schemaLinkPrefix, true, null, null)
-                    definitionsMap.put(refName, schema)
-                }
-            }
-
-            JsonBuilder jb = new JsonBuilder()
-            jb.call(rootMap)
-            String jsonStr = jb.toPrettyString()
-
-            sendTextResponse(jsonStr, "application/schema+json", "MoquiEntities.schema.json")
-        } else {
-            String entityName = extraPathNameList.get(0)
-            if (entityName.endsWith(".json")) entityName = entityName.substring(0, entityName.length() - 5)
-
-            String masterName = null
-            if (extraPathNameList.size() > 1) {
-                masterName = extraPathNameList.get(1)
-                if (masterName.endsWith(".json")) masterName = masterName.substring(0, masterName.length() - 5)
-            }
-            if (getMaster && !masterName) masterName = "default"
-
-            try {
-                EntityDefinition ed = efi.getEntityDefinition(entityName)
-                if (ed == null) {
-                    sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No entity found with name or alias [${entityName}]")
-                    return
-                }
-
-                Map schema = ed.getJsonSchema(false, true, null, schemaUri, linkPrefix, schemaLinkPrefix, !getMaster, masterName, null)
-                // TODO: support array wrapper (different URL? suffix?) with [type:'array', items:schema]
-
-                // sendJsonResponse(schema)
-                JsonBuilder jb = new JsonBuilder()
-                jb.call(schema)
-                String jsonStr = jb.toPrettyString()
-
-                sendTextResponse(jsonStr, "application/schema+json", "${entityName}.schema.json")
-            } catch (EntityNotFoundException e) {
-                if (logger.isTraceEnabled()) logger.trace("In entity REST schema entity not found: " + e.toString())
-                sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No entity found with name or alias [${entityName}]")
-            }
-        }
-    }
-
-    void handleEntityRestRaml(List<String> extraPathNameList, String linkPrefix, String schemaLinkPrefix, boolean getMaster) {
-        // make sure a user is logged in, screen/etc that calls will generally be configured to not require auth
-        if (!eci.getUser().getUsername()) {
-            // if there was a login error there will be a MessageFacade error message
-            String errorMessage = eci.message.errorsString
-            if (!errorMessage) errorMessage = "Authentication required for entity REST schema"
-            sendJsonError(HttpServletResponse.SC_UNAUTHORIZED, errorMessage)
-            return
-        }
-
-        EntityFacadeImpl efi = eci.getEcfi().getEntityFacade()
-
-        List<Map> schemasList = []
-        Map<String, Object> rootMap = [title:'Moqui Entity REST API', version:'v1', baseUri:linkPrefix,
-                                       mediaType:'application/json', schemas:schemasList] as Map<String, Object>
-        rootMap.put('traits', [[paged:[queryParameters:EntityDefinition.ramlPaginationParameters]]])
-
-        Set<String> entityNameSet
-        String masterName = null
-        if (extraPathNameList.size() > 0) {
-            String entityName = extraPathNameList.get(0)
-            if (entityName.endsWith(".raml")) entityName = entityName.substring(0, entityName.length() - 5)
-
-            if (extraPathNameList.size() > 1) {
-                masterName = extraPathNameList.get(1)
-                if (masterName.endsWith(".raml")) masterName = masterName.substring(0, masterName.length() - 5)
-            }
-
-            entityNameSet = new TreeSet<String>()
-            entityNameSet.add(entityName)
-        } else if (getMaster) {
-            // if getMaster and no entity name in path, just get entities with master definitions
-            entityNameSet = efi.getAllEntityNamesWithMaster()
-        } else {
-            entityNameSet = efi.getAllNonViewEntityNames()
-        }
-        for (String entityName in entityNameSet) {
-            EntityDefinition ed = efi.getEntityDefinition(entityName)
-            String refName = ed.getShortAlias() ?: ed.getFullEntityName()
-            if (getMaster) {
-                Set<String> masterNameSet = new LinkedHashSet<String>()
-                if (masterName) {
-                    masterNameSet.add(masterName)
-                } else {
-                    Map<String, EntityDefinition.MasterDefinition> masterDefMap = ed.getMasterDefinitionMap()
-                    masterNameSet.addAll(masterDefMap.keySet())
-                }
-                Map entityPathMap = [:]
-                for (String curMasterName in masterNameSet) {
-                    schemasList.add([("${refName}/${curMasterName}".toString()):"!include ${schemaLinkPrefix}/${refName}/${curMasterName}.json".toString()])
-
-                    Map ramlApi = ed.getRamlApi(masterName)
-                    entityPathMap.put("/" + curMasterName, ramlApi)
-                }
-                rootMap.put("/" + refName, entityPathMap)
-            } else {
-                schemasList.add([(refName):"!include ${schemaLinkPrefix}/${refName}.json".toString()])
-
-                Map ramlApi = ed.getRamlApi(null)
-                rootMap.put('/' + refName, ramlApi)
-            }
-        }
-
-        DumperOptions options = new DumperOptions()
-        options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK)
-        // default: options.setDefaultScalarStyle(DumperOptions.ScalarStyle.PLAIN)
-        options.setPrettyFlow(true)
-        Yaml yaml = new Yaml(options)
-        String yamlString = yaml.dump(rootMap)
-        // add beginning line "#%RAML 0.8", more efficient way to do this?
-        yamlString = "#%RAML 0.8\n" + yamlString
-
-        sendTextResponse(yamlString, "application/raml+yaml", "MoquiEntities.raml")
-    }
-
-    void handleEntityRestSwagger(List<String> extraPathNameList, String basePath, boolean getMaster) {
-        if (extraPathNameList.size() == 0) {
-            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No entity name specified in path (for all entities use 'all')")
-            return
-        }
-
-        EntityFacadeImpl efi = eci.getEcfi().getEntityFacade()
-
-        String entityName = extraPathNameList.get(0)
-        String outputType = "application/json"
-        if (entityName.endsWith(".yaml")) outputType = "application/yaml"
-        if (entityName.endsWith(".json") || entityName.endsWith(".yaml"))
-            entityName = entityName.substring(0, entityName.length() - 5)
-        if (entityName == 'all') entityName = null
-
-        String masterName = null
-        if (extraPathNameList.size() > 1) {
-            masterName = extraPathNameList.get(1)
-            if (masterName.endsWith(".json") || masterName.endsWith(".yaml"))
-                masterName = masterName.substring(0, masterName.length() - 5)
-        }
-
-        String filename = entityName ?: "Entities"
-        if (masterName) filename = filename + "." + masterName
-
-        response.addHeader("Access-Control-Allow-Origin", "*")
-        response.addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, PUT, PATCH, OPTIONS")
-        response.addHeader("Access-Control-Allow-Headers", "Content-Type, api_key, Authorization")
-
-        String fullHost = makeWebappHost(this.webappMoquiName, eci, this, true)
-        String scheme = fullHost.substring(0, fullHost.indexOf("://"))
-        String hostName = fullHost.substring(fullHost.indexOf("://") + 3)
-        Map definitionsMap = new TreeMap()
-        Map<String, Object> swaggerMap = [swagger:'2.0',
-            info:[title:("${filename} REST API"), version:'2.0.0'], host:hostName, basePath:basePath,
-            schemes:[scheme], consumes:['application/json', 'multipart/form-data'], produces:['application/json'],
-            securityDefinitions:[basicAuth:[type:'basic', description:'HTTP Basic Authentication'],
-                api_key:[type:"apiKey", name:"api_key", in:"header", description:'HTTP Header api_key, also supports tenant_id header']],
-            paths:[:], definitions:definitionsMap
-        ]
-
-        Set<String> entityNameSet
-        if (entityName) {
-            entityNameSet = new TreeSet<String>()
-            entityNameSet.add(entityName)
-        } else if (getMaster) {
-            // if getMaster and no entity name in path, just get entities with master definitions
-            entityNameSet = efi.getAllEntityNamesWithMaster()
-        } else {
-            entityNameSet = efi.getAllNonViewEntityNames()
-        }
-
-        for (String curEntityName in entityNameSet) {
-            EntityDefinition ed = efi.getEntityDefinition(curEntityName)
-            if (getMaster) {
-                Set<String> masterNameSet = new LinkedHashSet<String>()
-                if (masterName) {
-                    masterNameSet.add(masterName)
-                } else {
-                    Map<String, EntityDefinition.MasterDefinition> masterDefMap = ed.getMasterDefinitionMap()
-                    masterNameSet.addAll(masterDefMap.keySet())
-                }
-                for (String curMasterName in masterNameSet) {
-                    ed.addToSwaggerMap(swaggerMap, curMasterName)
-                }
-            } else {
-                ed.addToSwaggerMap(swaggerMap, null)
-            }
-        }
-
-        if (outputType == "application/json") {
-            JsonBuilder jb = new JsonBuilder()
-            jb.call(swaggerMap)
-            String jsonStr = jb.toPrettyString()
-            sendTextResponse(jsonStr, "application/json", "${filename}.swagger.json")
-        } else if (outputType == "application/yaml") {
-            DumperOptions options = new DumperOptions()
-            options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK)
-            // default: options.setDefaultScalarStyle(DumperOptions.ScalarStyle.PLAIN)
-            options.setPrettyFlow(true)
-            Yaml yaml = new Yaml(options)
-            String yamlString = yaml.dump(swaggerMap)
-
-            sendTextResponse(yamlString, "application/yaml", "${filename}.swagger.yaml")
-        } else {
-            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "Output type ${outputType} not supported")
-        }
-    }
-
     @Override
     void handleServiceRestCall(List<String> extraPathNameList) {
         ContextStack parmStack = (ContextStack) getParameters()
@@ -1103,8 +841,14 @@ class WebFacadeImpl implements WebFacade {
         // check for login, etc error messages
         if (eci.message.hasError()) {
             String errorsString = eci.message.errorsString
-            logger.warn((String) "General error in Service REST API: " + errorsString)
-            sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
+            if ("true".equals(request.getAttribute("moqui.login.error"))) {
+                logger.warn((String) "Login error in Service REST API: " + errorsString)
+                sendJsonError(HttpServletResponse.SC_UNAUTHORIZED, errorsString)
+            } else {
+                logger.warn((String) "General error in Service REST API: " + errorsString)
+                sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorsString)
+            }
+            return
         }
 
         // check for parsing error, send a 400 response
@@ -1130,12 +874,12 @@ class WebFacadeImpl implements WebFacade {
                     // logger.warn("========== REST ${request.getMethod()} ${request.getPathInfo()} ${extraPathNameList}; body list object: ${bodyListObj}")
                     parmStack.push()
                     parmStack.putAll((Map) bodyListObj)
-                    eci.context.push(parmStack)
+                    eci.contextStack.push(parmStack)
 
-                    RestApi.RestResult restResult = eci.getEcfi().getServiceFacade().getRestApi().run(extraPathNameList, eci)
+                    RestApi.RestResult restResult = eci.serviceFacade.restApi.run(extraPathNameList, eci)
                     responseList.add(restResult.responseObj ?: [:])
 
-                    eci.context.pop()
+                    eci.contextStack.pop()
                     parmStack.pop()
                 }
                 response.addIntHeader('X-Run-Time-ms', (System.currentTimeMillis() - startTime) as int)
@@ -1150,9 +894,9 @@ class WebFacadeImpl implements WebFacade {
                     sendJsonResponse(responseList)
                 }
             } else {
-                eci.context.push(parmStack)
-                RestApi.RestResult restResult = eci.getEcfi().getServiceFacade().getRestApi().run(extraPathNameList, eci)
-                eci.context.pop()
+                eci.contextStack.push(parmStack)
+                RestApi.RestResult restResult = eci.serviceFacade.restApi.run(extraPathNameList, eci)
+                eci.contextStack.pop()
                 response.addIntHeader('X-Run-Time-ms', (System.currentTimeMillis() - startTime) as int)
                 restResult.setHeaders(response)
 
@@ -1200,71 +944,6 @@ class WebFacadeImpl implements WebFacade {
             logger.warn((String) "General error in Service REST API: " + t.toString(), t)
             sendJsonError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errorMessage)
         }
-    }
-
-    void handleServiceRestSwagger(List<String> extraPathNameList, String basePath) {
-        if (extraPathNameList.size() == 0) {
-            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No root resource name specified in path")
-            return
-        }
-
-        String outputType = "application/json"
-        List<String> rootPathList = []
-        StringBuilder filenameBase = new StringBuilder()
-        for (String pathName in extraPathNameList) {
-            if (pathName.endsWith(".yaml")) outputType = "application/yaml"
-            if (pathName.endsWith(".json") || pathName.endsWith(".yaml"))
-                pathName = pathName.substring(0, pathName.length() - 5)
-            rootPathList.add(pathName)
-            filenameBase.append(pathName).append('.')
-        }
-
-        response.addHeader("Access-Control-Allow-Origin", "*")
-        response.addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, PUT, PATCH, OPTIONS")
-        response.addHeader("Access-Control-Allow-Headers", "Content-Type, api_key, Authorization")
-
-        String fullHost = makeWebappHost(this.webappMoquiName, eci, this, true)
-        String scheme = fullHost.substring(0, fullHost.indexOf("://"))
-        String hostName = fullHost.substring(fullHost.indexOf("://") + 3)
-        Map swaggerMap = eci.ecfi.serviceFacade.restApi.getSwaggerMap(rootPathList, [scheme], hostName, basePath)
-        if (outputType == "application/json") {
-            JsonBuilder jb = new JsonBuilder()
-            jb.call(swaggerMap)
-            String jsonStr = jb.toPrettyString()
-            sendTextResponse(jsonStr, "application/json", "${filenameBase}swagger.json")
-        } else if (outputType == "application/yaml") {
-            DumperOptions options = new DumperOptions()
-            options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK)
-            // default: options.setDefaultScalarStyle(DumperOptions.ScalarStyle.PLAIN)
-            options.setPrettyFlow(true)
-            Yaml yaml = new Yaml(options)
-            String yamlString = yaml.dump(swaggerMap)
-
-            sendTextResponse(yamlString, "application/yaml", "${filenameBase}swagger.yaml")
-        } else {
-            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "Output type ${outputType} not supported")
-        }
-    }
-
-    void handleServiceRestRaml(List<String> extraPathNameList, String linkPrefix) {
-        if (extraPathNameList.size() == 0) {
-            sendJsonError(HttpServletResponse.SC_BAD_REQUEST, "No root resource name specified in path")
-            return
-        }
-        String rootResourceName = extraPathNameList.get(0)
-        if (rootResourceName.endsWith(".raml")) rootResourceName = rootResourceName.substring(0, rootResourceName.length() - 5)
-
-        Map swaggerMap = eci.ecfi.serviceFacade.restApi.getRamlMap(rootResourceName, linkPrefix)
-        DumperOptions options = new DumperOptions()
-        options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK)
-        // default: options.setDefaultScalarStyle(DumperOptions.ScalarStyle.PLAIN)
-        options.setPrettyFlow(true)
-        Yaml yaml = new Yaml(options)
-        String yamlString = yaml.dump(swaggerMap)
-        // add beginning line "#%RAML 1.0", more efficient way to do this?
-        yamlString = "#%RAML 1.0\n" + yamlString
-
-        sendTextResponse(yamlString, "application/raml+yaml", "${rootResourceName}.raml")
     }
 
     void saveScreenLastInfo(String screenPath, Map parameters) {
@@ -1315,7 +994,7 @@ class WebFacadeImpl implements WebFacade {
         session.setAttribute("moqui.error.parameters", parms)
     }
 
-    DiskFileItemFactory makeDiskFileItemFactory(ServletContext context) {
+    protected DiskFileItemFactory makeDiskFileItemFactory() {
         // NOTE: consider keeping this factory somewhere to be more efficient, if it even makes a difference...
         File repository = new File(eci.ecfi.runtimePath + "/tmp")
         if (!repository.exists()) repository.mkdir()
@@ -1323,7 +1002,7 @@ class WebFacadeImpl implements WebFacade {
         DiskFileItemFactory factory = new DiskFileItemFactory(DiskFileItemFactory.DEFAULT_SIZE_THRESHOLD, repository)
 
         // TODO: this was causing files to get deleted before the upload was streamed... need to figure out something else
-        //FileCleaningTracker fileCleaningTracker = FileCleanerCleanup.getFileCleaningTracker(context)
+        //FileCleaningTracker fileCleaningTracker = FileCleanerCleanup.getFileCleaningTracker(request.getServletContext())
         //factory.setFileCleaningTracker(fileCleaningTracker)
         return factory
     }

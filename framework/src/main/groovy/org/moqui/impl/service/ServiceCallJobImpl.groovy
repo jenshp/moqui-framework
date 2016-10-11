@@ -30,6 +30,7 @@ import java.sql.Timestamp
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 @CompileStatic
@@ -44,7 +45,7 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
 
     ServiceCallJobImpl(String jobName, ServiceFacadeImpl sfi) {
         super(sfi)
-        ExecutionContextImpl eci = sfi.ecfi.eci
+        ExecutionContextImpl eci = sfi.ecfi.getEci()
 
         // get ServiceJob, make sure exists
         this.jobName = jobName
@@ -59,7 +60,7 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
             parameters.put((String) serviceJobParameter.parameterName, serviceJobParameter.parameterValue)
 
         // set the serviceName so rest of ServiceCallImpl works
-        setServiceName((String) serviceJob.serviceName)
+        serviceNameInternal((String) serviceJob.serviceName)
     }
 
     @Override
@@ -72,7 +73,7 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
 
     @Override
     String run() throws ServiceException {
-        ExecutionContextFactoryImpl ecfi = sfi.getEcfi()
+        ExecutionContextFactoryImpl ecfi = sfi.ecfi
         ExecutionContextImpl eci = ecfi.getEci()
         validateCall(eci)
 
@@ -120,30 +121,31 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
         return runFuture.get()
     }
     @Override
-    Map<String, Object> get(long timeout, java.util.concurrent.TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+    Map<String, Object> get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
         if (runFuture == null) throw new IllegalStateException("Must call run() before using Future interface methods")
         return runFuture.get(timeout, unit)
     }
 
     static class ServiceJobCallable implements Callable<Map<String, Object>>, Externalizable {
         transient ExecutionContextFactoryImpl ecfi
-        String threadTenantId, threadUsername, currentUserId
+        String threadUsername, currentUserId
         String jobName, jobDescription, serviceName, topic, jobRunId
         Map<String, Object> parameters
         boolean clearLock
+        int transactionTimeout
 
         // default constructor for deserialization only!
         ServiceJobCallable() { }
 
         ServiceJobCallable(ExecutionContextImpl eci, Map<String, Object> serviceJob, String jobRunId, boolean clearLock, Map<String, Object> parameters) {
             ecfi = eci.ecfi
-            threadTenantId = eci.tenantId
-            threadUsername = eci.user.username
-            currentUserId = eci.user.userId
+            threadUsername = eci.userFacade.username
+            currentUserId = eci.userFacade.userId
             jobName = (String) serviceJob.jobName
             jobDescription = (String) serviceJob.description
             serviceName = (String) serviceJob.serviceName
             topic = (String) serviceJob.topic
+            transactionTimeout = (serviceJob.transactionTimeout ?: 1800) as int
             this.jobRunId = jobRunId
             this.clearLock = clearLock
             this.parameters = new HashMap<>(parameters)
@@ -151,7 +153,6 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
 
         @Override
         void writeExternal(ObjectOutput out) throws IOException {
-            out.writeUTF(threadTenantId) // never null
             out.writeObject(threadUsername) // might be null
             out.writeObject(currentUserId) // might be null
             out.writeUTF(jobName) // never null
@@ -160,12 +161,11 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
             out.writeObject(topic) // might be null
             out.writeUTF(jobRunId) // never null
             out.writeBoolean(clearLock)
+            out.writeInt(transactionTimeout)
             out.writeObject(parameters)
         }
-
         @Override
         void readExternal(ObjectInput objectInput) throws IOException, ClassNotFoundException {
-            threadTenantId = objectInput.readUTF()
             threadUsername = (String) objectInput.readObject()
             currentUserId = (String) objectInput.readObject()
             jobName = objectInput.readUTF()
@@ -174,6 +174,7 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
             topic = (String) objectInput.readObject()
             jobRunId = objectInput.readUTF()
             clearLock = objectInput.readBoolean()
+            transactionTimeout = objectInput.readInt()
             parameters = (Map<String, Object>) objectInput.readObject()
         }
 
@@ -186,42 +187,45 @@ class ServiceCallJobImpl extends ServiceCallImpl implements ServiceCallJob {
         Map<String, Object> call() throws Exception {
             ExecutionContextImpl threadEci = (ExecutionContextImpl) null
             try {
-                threadEci = getEcfi().getEci()
-                threadEci.changeTenant(threadTenantId)
+                ExecutionContextFactoryImpl ecfi = getEcfi()
+                threadEci = ecfi.getEci()
                 if (threadUsername != null && threadUsername.length() > 0)
-                    threadEci.userFacade.internalLoginUser(threadUsername, threadTenantId)
+                    threadEci.userFacade.internalLoginUser(threadUsername)
 
                 // set hostAddress, hostName, runThread, startTime on ServiceJobRun
-                InetAddress localHost = getEcfi().getLocalhostAddress()
+                InetAddress localHost = ecfi.getLocalhostAddress()
                 // NOTE: no need to run async or separate thread, is in separate TX because no wrapping TX for these service calls
-                ecfi.service.sync().name("update", "moqui.service.job.ServiceJobRun")
+                ecfi.serviceFacade.sync().name("update", "moqui.service.job.ServiceJobRun")
                         .parameters([jobRunId:jobRunId, hostAddress:(localHost?.getHostAddress() ?: '127.0.0.1'),
                             hostName:(localHost?.getHostName() ?: 'localhost'), runThread:Thread.currentThread().getName(),
                             startTime:threadEci.user.nowTimestamp] as Map<String, Object>)
                         .disableAuthz().call()
 
                 // NOTE: authz is disabled because authz is checked before queueing
-                Map<String, Object> results = getEcfi().service.sync().name(serviceName).parameters(parameters).disableAuthz().call()
+                Map<String, Object> results = ecfi.serviceFacade.sync().name(serviceName).parameters(parameters)
+                        .transactionTimeout(transactionTimeout).disableAuthz().call()
 
                 // set endTime, results, messages, errors on ServiceJobRun
                 String resultString = JsonOutput.toJson(results)
-                boolean hasError = threadEci.message.hasError()
-                String messages = threadEci.message.getMessagesString()
-                String errors = threadEci.message.getErrorsString()
-                Timestamp nowTimestamp = threadEci.user.nowTimestamp
+                boolean hasError = threadEci.messageFacade.hasError()
+                String messages = threadEci.messageFacade.getMessagesString()
+                if (messages != null && messages.length() > 4000) messages = messages.substring(0, 4000)
+                String errors = hasError ? threadEci.messageFacade.getErrorsString() : null
+                if (errors != null && errors.length() > 4000) errors = errors.substring(0, 4000)
+                Timestamp nowTimestamp = threadEci.userFacade.nowTimestamp
 
                 // before calling other services clear out errors or they won't run
-                if (hasError) threadEci.message.clearErrors()
+                if (hasError) threadEci.messageFacade.clearErrors()
 
                 // clear the ServiceJobRunLock if there is one
                 if (clearLock) {
-                    ecfi.service.sync().name("update", "moqui.service.job.ServiceJobRunLock")
+                    ecfi.serviceFacade.sync().name("update", "moqui.service.job.ServiceJobRunLock")
                             .parameter("jobName", jobName).parameter("jobRunId", null)
                             .disableAuthz().call()
                 }
 
                 // NOTE: no need to run async or separate thread, is in separate TX because no wrapping TX for these service calls
-                ecfi.service.sync().name("update", "moqui.service.job.ServiceJobRun")
+                ecfi.serviceFacade.sync().name("update", "moqui.service.job.ServiceJobRun")
                         .parameters([jobRunId:jobRunId, endTime:nowTimestamp, results:resultString,
                             messages:messages, hasError:(hasError ? 'Y' : 'N'), errors:errors] as Map<String, Object>)
                         .disableAuthz().call()

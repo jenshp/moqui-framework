@@ -53,7 +53,6 @@ class ScreenDefinition {
     protected Map<String, TransitionItem> transitionByName = new HashMap<>()
     protected Map<String, SubscreensItem> subscreensByName = new HashMap<>()
     protected List<SubscreensItem> subscreensItemsSorted = null
-    protected Set<String> tenantsAllowed = new HashSet<>()
 
     protected XmlAction alwaysActions = null
     protected XmlAction preActions = null
@@ -97,9 +96,10 @@ class ScreenDefinition {
         }
         // transition-include
         for (MNode transitionInclNode in screenNode.children("transition-include")) {
-            ScreenDefinition includeScreen = ecfi.getScreenFacade().getScreenDefinition(transitionInclNode.attribute("location"))
+            ScreenDefinition includeScreen = ecfi.screenFacade.getScreenDefinition(transitionInclNode.attribute("location"))
+            if (includeScreen != null) dependsOnScreenLocations.add(includeScreen.location)
             MNode transitionNode = includeScreen?.getTransitionItem(transitionInclNode.attribute("name"), transitionInclNode.attribute("method"))?.transitionNode
-            if (transitionNode == null) throw new IllegalArgumentException("For transition-include could not find transition [${transitionInclNode.attribute("name")}] with method [${transitionInclNode.attribute("method")}] in screen at [${transitionInclNode.attribute("location")}]")
+            if (transitionNode == null) throw new IllegalArgumentException("For transition-include could not find transition ${transitionInclNode.attribute("name")} with method ${transitionInclNode.attribute("method")} in screen at ${transitionInclNode.attribute("location")}")
             TransitionItem ti = new TransitionItem(transitionNode, this)
             transitionByName.put(ti.method == "any" ? ti.name : ti.name + "#" + ti.method, ti)
         }
@@ -110,9 +110,6 @@ class ScreenDefinition {
 
         // subscreens
         populateSubscreens()
-
-        // tenants-allowed
-        if (screenNode.attribute("tenants-allowed")) tenantsAllowed.addAll(Arrays.asList((screenNode.attribute("tenants-allowed")).split(",")))
 
         // macro-template - go through entire list and set all found, basically we want the last one if there are more than one
         List<MNode> macroTemplateList = screenNode.children("macro-template")
@@ -166,7 +163,7 @@ class ScreenDefinition {
             location = location.substring(0, location.indexOf('#'))
         }
 
-        ScreenDefinition includeScreen = sfi.getEcfi().getScreenFacade().getScreenDefinition(location)
+        ScreenDefinition includeScreen = sfi.getEcfi().screenFacade.getScreenDefinition(location)
         ScreenSection includeSection = includeScreen?.getSection(sectionName)
         if (includeSection == null) throw new IllegalArgumentException("Could not find section [${sectionNode.attribute("name")} to include at location [${sectionNode.attribute("location")}]")
         sectionByName.put(sectionNode.attribute("name"), includeSection)
@@ -253,7 +250,6 @@ class ScreenDefinition {
     String getDefaultSubscreensItem() { return subscreensNode?.attribute('default-item') }
     MNode getWebSettingsNode() { return webSettingsNode }
     String getLocation() { return location }
-    Set<String> getTenantsAllowed() { return tenantsAllowed }
 
     String getScreenName() { return screenName }
     boolean isStandalone() { return standalone }
@@ -427,7 +423,7 @@ class ScreenDefinition {
         for (SubscreensItem si in allItems) {
             // check the menu include flag
             if (!si.menuInclude) continue
-            // valid in current context? (user group, tenant, etc)
+            // valid in current context? (user group, etc)
             if (!si.isValidInCurrentContext()) continue
             // made it through the checks? add it in...
             filteredList.add(si)
@@ -439,19 +435,20 @@ class ScreenDefinition {
     ScreenSection getRootSection() { return rootSection }
     void render(ScreenRenderImpl sri, boolean isTargetScreen) {
         // NOTE: don't require authz if the screen doesn't require auth
-        String requireAuthentication = screenNode.attribute('require-authentication')
+        String requireAuthentication = screenNode.attribute("require-authentication")
         ArtifactExecutionInfoImpl aei = new ArtifactExecutionInfoImpl(location,
-                ArtifactExecutionInfo.AT_XML_SCREEN, ArtifactExecutionInfo.AUTHZA_VIEW)
-        sri.ec.artifactExecutionImpl.pushInternal(aei, isTargetScreen ?
+                ArtifactExecutionInfo.AT_XML_SCREEN, ArtifactExecutionInfo.AUTHZA_VIEW, sri.outputContentType)
+        if ("false".equals(screenNode.attribute("track-artifact-hit"))) aei.setTrackArtifactHit(false)
+        sri.ec.artifactExecutionFacade.pushInternal(aei, isTargetScreen ?
                 (requireAuthentication == null || requireAuthentication.length() == 0 || "true".equals(requireAuthentication)) : false)
 
         boolean loggedInAnonymous = false
         if ("anonymous-all".equals(requireAuthentication)) {
-            sri.ec.artifactExecution.setAnonymousAuthorizedAll()
-            loggedInAnonymous = sri.ec.getUser().loginAnonymousIfNoUser()
+            sri.ec.artifactExecutionFacade.setAnonymousAuthorizedAll()
+            loggedInAnonymous = sri.ec.userFacade.loginAnonymousIfNoUser()
         } else if ("anonymous-view".equals(requireAuthentication)) {
-            sri.ec.artifactExecution.setAnonymousAuthorizedView()
-            loggedInAnonymous = sri.ec.getUser().loginAnonymousIfNoUser()
+            sri.ec.artifactExecutionFacade.setAnonymousAuthorizedView()
+            loggedInAnonymous = sri.ec.userFacade.loginAnonymousIfNoUser()
         }
 
         // logger.info("Rendering screen ${location}, screenNode: \n${screenNode}")
@@ -459,24 +456,24 @@ class ScreenDefinition {
         try {
             rootSection.render(sri)
         } finally {
-            sri.ec.artifactExecution.pop(aei)
-            if (loggedInAnonymous) ((UserFacadeImpl) sri.ec.getUser()).logoutAnonymousOnly()
+            sri.ec.artifactExecutionFacade.pop(aei)
+            if (loggedInAnonymous) sri.ec.userFacade.logoutAnonymousOnly()
         }
     }
 
     ScreenSection getSection(String sectionName) {
         ScreenSection ss = sectionByName.get(sectionName)
-        if (ss == null) throw new IllegalArgumentException("Could not find form [${sectionName}] in screen: ${getLocation()}")
+        if (ss == null) throw new BaseException("Could not find section ${sectionName} in screen ${getLocation()}")
         return ss
     }
     ScreenForm getForm(String formName) {
         ScreenForm sf = formByName.get(formName)
-        if (sf == null) throw new IllegalArgumentException("Could not find form [${formName}] in screen: ${getLocation()}")
+        if (sf == null) throw new BaseException("Could not find form ${formName} in screen ${getLocation()}")
         return sf
     }
     ScreenTree getTree(String treeName) {
         ScreenTree st = treeByName.get(treeName)
-        if (st == null) throw new IllegalArgumentException("Could not find tree [${treeName}] in screen: ${getLocation()}")
+        if (st == null) throw new BaseException("Could not find tree ${treeName} in screen ${getLocation()}")
         return st
     }
 
@@ -664,23 +661,23 @@ class ScreenDefinition {
         }
 
         ResponseItem run(ScreenRenderImpl sri) {
-            ExecutionContextImpl ec = sri.getEc()
+            ExecutionContextImpl ec = sri.ec
 
             // NOTE: if parent screen of transition does not require auth, don't require authz
             // NOTE: use the View authz action to leave it open, ie require minimal authz; restrictions are often more
             //    in the services/etc if/when needed, or specific transitions can have authz settings
             String requireAuthentication = (String) parentScreen.screenNode.attribute('require-authentication')
             ArtifactExecutionInfo aei = new ArtifactExecutionInfoImpl("${parentScreen.location}/${name}",
-                    ArtifactExecutionInfo.AT_XML_SCREEN_TRANS, ArtifactExecutionInfo.AUTHZA_VIEW)
-            ec.getArtifactExecutionImpl().pushInternal(aei, (!requireAuthentication || requireAuthentication == "true"))
+                    ArtifactExecutionInfo.AT_XML_SCREEN_TRANS, ArtifactExecutionInfo.AUTHZA_VIEW, sri.outputContentType)
+            ec.artifactExecutionFacade.pushInternal(aei, (!requireAuthentication || requireAuthentication == "true"))
 
             boolean loggedInAnonymous = false
             if (requireAuthentication == "anonymous-all") {
-                ec.artifactExecution.setAnonymousAuthorizedAll()
-                loggedInAnonymous = ec.getUser().loginAnonymousIfNoUser()
+                ec.artifactExecutionFacade.setAnonymousAuthorizedAll()
+                loggedInAnonymous = ec.userFacade.loginAnonymousIfNoUser()
             } else if (requireAuthentication == "anonymous-view") {
-                ec.artifactExecution.setAnonymousAuthorizedView()
-                loggedInAnonymous = ec.getUser().loginAnonymousIfNoUser()
+                ec.artifactExecutionFacade.setAnonymousAuthorizedView()
+                loggedInAnonymous = ec.userFacade.loginAnonymousIfNoUser()
             }
 
             try {
@@ -688,7 +685,7 @@ class ScreenDefinition {
                 ScreenUrlInfo.UrlInstance screenUrlInstance = sri.getScreenUrlInstance()
                 setAllParameters(screenUrlInfo.getExtraPathNameList(), ec)
                 // for alias transitions rendered in-request put the parameters in the context
-                if (screenUrlInstance.getTransitionAliasParameters()) ec.getContext().putAll(screenUrlInstance.getTransitionAliasParameters())
+                if (screenUrlInstance.getTransitionAliasParameters()) ec.contextStack.putAll(screenUrlInstance.getTransitionAliasParameters())
 
 
                 if (!checkCondition(ec)) {
@@ -698,7 +695,7 @@ class ScreenDefinition {
                 }
 
                 // don't push a map on the context, let the transition actions set things that will remain: sri.ec.context.push()
-                ec.getContext().put("sri", sri)
+                ec.contextStack.put("sri", sri)
                 if (actions != null) actions.run(ec)
 
                 ResponseItem ri = null
@@ -719,8 +716,8 @@ class ScreenDefinition {
 
                 // all done so pop the artifact info; don't bother making sure this is done on errors/etc like in a finally
                 // clause because if there is an error this will help us know how we got there
-                ec.getArtifactExecution().pop(aei)
-                if (loggedInAnonymous) ((UserFacadeImpl) ec.getUser()).logoutAnonymousOnly()
+                ec.artifactExecutionFacade.pop(aei)
+                if (loggedInAnonymous) ec.userFacade.logoutAnonymousOnly()
             }
         }
     }
@@ -736,17 +733,17 @@ class ScreenDefinition {
 
         // NOTE: runs pre-actions too, see sri.recursiveRunTransition() call in sri.internalRender()
         ResponseItem run(ScreenRenderImpl sri) {
-            ExecutionContextImpl ec = sri.getEc()
+            ExecutionContextImpl ec = sri.ec
             WebFacade wf = ec.getWeb()
             if (wf == null) throw new BaseException("Cannot run actions transition outside of a web request")
 
             // run actions (if there are any)
             XmlAction actions = parentScreen.rootSection.actions
             if (actions != null) {
-                ec.context.put("sri", sri)
+                ec.contextStack.put("sri", sri)
                 actions.run(ec)
                 // use entire ec.context to get values from always-actions and pre-actions
-                wf.sendJsonResponse(StupidJavaUtilities.unwrapMap(ec.context))
+                wf.sendJsonResponse(StupidJavaUtilities.unwrapMap(ec.contextStack))
             } else {
                 wf.sendJsonResponse(new HashMap())
             }
@@ -765,7 +762,7 @@ class ScreenDefinition {
         }
 
         ResponseItem run(ScreenRenderImpl sri) {
-            ScreenForm.saveFormConfig(sri.getEc())
+            ScreenForm.saveFormConfig(sri.ec)
             return defaultResponse
         }
     }
@@ -782,7 +779,7 @@ class ScreenDefinition {
         }
 
         ResponseItem run(ScreenRenderImpl sri) {
-            String formListFindId = ScreenForm.processFormSavedFind(sri.getEc())
+            String formListFindId = ScreenForm.processFormSavedFind(sri.ec)
 
             if (formListFindId == null || sri.response == null) return defaultResponse
 
@@ -794,7 +791,7 @@ class ScreenDefinition {
             ScreenUrlInfo fwdUrlInfo = ScreenUrlInfo.getScreenUrlInfo(sri, null, curFpnl, null, null)
             ScreenUrlInfo.UrlInstance fwdInstance = fwdUrlInfo.getInstance(sri, null)
 
-            Map<String, Object> flfInfo = ScreenForm.getFormListFindInfo(formListFindId, sri.getEc(), null)
+            Map<String, Object> flfInfo = ScreenForm.getFormListFindInfo(formListFindId, sri.ec, null)
             fwdInstance.addParameters((Map<String, String>) flfInfo.findParameters)
 
             sri.response.sendRedirect(fwdInstance.getUrlWithParams())
@@ -873,7 +870,6 @@ class ScreenDefinition {
         protected boolean menuInclude
         protected Class disableWhenGroovy = null
         protected String userGroupId = null
-        protected Set<String> tenantsAllowed = null
 
         SubscreensItem(String name, String location, MNode screen, ScreenDefinition parentScreen) {
             this.parentScreen = parentScreen
@@ -894,10 +890,6 @@ class ScreenDefinition {
 
             if (subscreensItem.attribute("disable-when")) disableWhenGroovy = parentScreen.sfi.ecfi.getGroovyClassLoader()
                     .parseClass(subscreensItem.attribute("disable-when"), "${parentScreen.location}.subscreens_item_${name}.disable_when")
-            if (subscreensItem.attribute("tenants-allowed")) {
-                String tenantsAllowedStr = subscreensItem.attribute("tenants-allowed")
-                tenantsAllowed = new TreeSet(tenantsAllowedStr.split(',') as List)
-            }
         }
 
         SubscreensItem(EntityValue subscreensItem, ScreenDefinition parentScreen) {
@@ -908,10 +900,6 @@ class ScreenDefinition {
             menuIndex = subscreensItem.menuIndex ? subscreensItem.menuIndex as Integer : null
             menuInclude = (subscreensItem.menuInclude == "Y")
             userGroupId = subscreensItem.userGroupId
-            if (subscreensItem.tenantsAllowed) {
-                String tenantsAllowedStr = subscreensItem.tenantsAllowed
-                tenantsAllowed = new TreeSet(tenantsAllowedStr.split(',') as List)
-            }
         }
 
         String getDefaultTitle() {
@@ -937,8 +925,6 @@ class ScreenDefinition {
             ExecutionContextImpl eci = parentScreen.sfi.getEcfi().getEci()
             // if the subscreens item is limited to a UserGroup make sure user is in that group
             if (userGroupId && !(userGroupId in eci.getUser().getUserGroupIdSet())) return false
-            // if limited to tenants make sure active tenant is one of them
-            if (tenantsAllowed != null && !(tenantsAllowed.contains(eci.getTenantId()))) return false
 
             return true
         }

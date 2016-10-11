@@ -104,8 +104,6 @@ along with this software (see the LICENSE.md file). If not, see
                         configuration data; eventual consistency is okay; typically cached</xs:documentation></xs:annotation></xs:enumeration>
                     <xs:enumeration value="analytical"><xs:annotation><xs:documentation>analytical entities with data
                         typically derived from transactional data</xs:documentation></xs:annotation></xs:enumeration>
-                    <xs:enumeration value="tenantcommon"><xs:annotation><xs:documentation>tenant configuration and other
-                        data common among all tenants</xs:documentation></xs:annotation></xs:enumeration>
                 </xs:restriction></xs:simpleType>
             </xs:attribute>
             <xs:attribute name="sequence-primary-use-uuid" type="boolean" default="false">
@@ -133,7 +131,6 @@ along with this software (see the LICENSE.md file). If not, see
                     this entity then set this attribute to false.
                 </xs:documentation></xs:annotation>
             </xs:attribute>
-            <xs:attribute name="allow-user-field" type="boolean" default="false"/>
             <xs:attribute name="cache" type="cache-options" default="false"/>
             <xs:attribute name="authorize-skip" type="authorize-skip-options" default="false"/>
             <xs:attribute name="create-only" type="boolean" default="false">
@@ -191,6 +188,7 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:attribute name="column-name" type="xs:string"/>
             <xs:attribute name="type" type="field-type-options" use="required"/>
             <xs:attribute name="is-pk" default="false" type="boolean"/>
+            <xs:attribute name="not-null" default="false" type="boolean"/>
             <xs:attribute name="encrypt" default="false" type="boolean"/>
             <xs:attribute name="enable-audit-log" default="false" type="audit-log-options">
                 <xs:annotation><xs:documentation>
