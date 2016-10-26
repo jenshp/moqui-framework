@@ -111,10 +111,10 @@ class EntityFacadeImpl implements EntityFacade {
         databaseTzLcCalendar = Calendar.getInstance(databaseTimeZone, databaseLocale)
 
         // init entity meta-data
-        entityDefinitionCache = ecfi.getCacheFacade().getCache("entity.definition")
-        entityLocationSingleCache = ecfi.getCacheFacade().getCache("entity.location")
+        entityDefinitionCache = ecfi.cacheFacade.getCache("entity.definition")
+        entityLocationSingleCache = ecfi.cacheFacade.getCache("entity.location")
         // NOTE: don't try to load entity locations before constructor is complete; this.loadAllEntityLocations()
-        entitySequenceBankCache = ecfi.getCacheFacade().getCache("entity.sequence.bank")
+        entitySequenceBankCache = ecfi.cacheFacade.getCache("entity.sequence.bank")
 
         // init connection pool (DataSource) for each group
         initAllDatasources()
@@ -518,23 +518,7 @@ class EntityFacadeImpl implements EntityFacade {
         }
     }
 
-    protected Map<String, MNode> entityFileRootMap = new HashMap<>()
-    protected MNode getEntityFileRoot(ResourceReference entityRr) {
-        MNode existingNode = entityFileRootMap.get(entityRr.getLocation())
-        if (existingNode != null && existingNode.attribute("_loadedTime")) {
-            long loadedTime = existingNode.attribute("_loadedTime") as Long
-            long lastModified = entityRr.getLastModified()
-            if (lastModified > loadedTime) existingNode = null
-        }
-        if (existingNode == null) {
-            MNode entityRoot = MNode.parse(entityRr)
-            entityRoot.attributes.put("_loadedTime", entityRr.getLastModified() as String)
-            entityFileRootMap.put(entityRr.getLocation(), entityRoot)
-            return entityRoot
-        } else {
-            return existingNode
-        }
-    }
+    protected static MNode getEntityFileRoot(ResourceReference entityRr) { return MNode.parse(entityRr) }
 
     int loadAllEntityDefinitions() {
         int entityCount = 0
