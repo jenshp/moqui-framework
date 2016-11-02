@@ -24,10 +24,9 @@ import org.moqui.entity.EntityFacade
 import org.moqui.entity.EntityList
 import org.moqui.entity.EntityListIterator
 import org.moqui.entity.EntityValue
-import org.moqui.impl.StupidJavaUtilities
-import org.moqui.impl.StupidUtilities
-import org.moqui.impl.StupidWebUtilities
+import org.moqui.util.WebUtilities
 import org.moqui.impl.context.ArtifactExecutionInfoImpl
+import org.moqui.impl.context.ContextJavaUtil
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
 import org.moqui.impl.context.ResourceFacadeImpl
@@ -42,7 +41,9 @@ import org.moqui.impl.screen.ScreenUrlInfo.UrlInstance
 import org.moqui.screen.ScreenRender
 import org.moqui.util.ContextStack
 import org.moqui.util.MNode
-
+import org.moqui.resource.ResourceReference
+import org.moqui.util.ObjectUtilities
+import org.moqui.util.StringUtilities
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -296,7 +297,7 @@ class ScreenRenderImpl implements ScreenRender {
                 String queryString = request.getQueryString()
 
                 // NOTE: We decode path parameter ourselves, so use getRequestURI instead of getPathInfo
-                Map<String, Object> pathInfoParameterMap = StupidWebUtilities.getPathInfoParameterMap(request.getRequestURI())
+                Map<String, Object> pathInfoParameterMap = WebUtilities.getPathInfoParameterMap(request.getRequestURI())
                 if (!targetTransition.isReadOnly() && (
                         (!request.isSecure() && webappInfo.httpsEnabled) ||
                         (queryString != null && queryString.length() > 0) ||
@@ -469,7 +470,7 @@ class ScreenRenderImpl implements ScreenRender {
                         Map parms = new HashMap()
                         if (web.requestParameters != null) parms.putAll(web.requestParameters)
                         if (web.requestAttributes != null) parms.putAll(web.requestAttributes)
-                        responseMap.put("currentParameters", StupidJavaUtilities.unwrapMap(parms))
+                        responseMap.put("currentParameters", ContextJavaUtil.unwrapMap(parms))
 
                         // add screen path, parameters from fullUrl
                         responseMap.put("screenPathList", fullUrl.sui.fullPathNameList)
@@ -507,7 +508,7 @@ class ScreenRenderImpl implements ScreenRender {
             // strip template extension(s) to avoid problems with trying to find content types based on them
             String fileContentType = sfi.ecfi.resourceFacade.getContentType(tr != null ? tr.stripTemplateExtension(fileName) : fileName)
 
-            boolean isBinary = tr == null && sfi.ecfi.resourceFacade.isBinaryContentType(fileContentType)
+            boolean isBinary = tr == null && ResourceReference.isBinaryContentType(fileContentType)
             // if (isTraceEnabled) logger.trace("Content type for screen sub-content filename [${fileName}] is [${fileContentType}], default [${this.outputContentType}], is binary? ${isBinary}")
 
             if (isBinary) {
@@ -522,7 +523,7 @@ class ScreenRenderImpl implements ScreenRender {
                     try {
                         is = fileResourceRef.openStream()
                         OutputStream os = response.outputStream
-                        int totalLen = StupidUtilities.copyStream(is, os)
+                        int totalLen = ObjectUtilities.copyStream(is, os)
 
                         if (screenUrlInfo.targetScreen.screenNode.attribute("track-artifact-hit") != "false") {
                             sfi.ecfi.countArtifactHit(ArtifactExecutionInfo.AT_XML_SCREEN_CONTENT, fileContentType,
@@ -640,7 +641,7 @@ class ScreenRenderImpl implements ScreenRender {
 
                 String filename = ec.context.saveFilename as String
                 if (filename) {
-                    String utfFilename = StupidUtilities.encodeAsciiFilename(filename)
+                    String utfFilename = StringUtilities.encodeAsciiFilename(filename)
                     response.addHeader("Content-Disposition", "attachment; filename=\"${filename}\"; filename*=utf-8''${utfFilename}")
                 }
             }
@@ -1122,25 +1123,6 @@ class ScreenRenderImpl implements ScreenRender {
         } else {
             throw new IllegalArgumentException("Found form-list ${listRenderInfo.getFormNode().attribute('name')} list entry that is not a Map, is a ${listEntry.class.name} which should never happen after running list through list pre-processor")
         }
-        /* old code, needs more testing to make sure we need none of this, AggregationUtil now returns a pure list of maps so we just want context.addAll
-        MNode formNode = listRenderInfo.formNode
-        String listEntryStr = formNode.attribute('list-entry')
-        if (listEntryStr != null && !listEntryStr.isEmpty()) {
-            ec.contextStack.put(listEntryStr, listEntry)
-            ec.contextStack.put(listEntryStr + "_index", index)
-            ec.contextStack.put(listEntryStr + "_has_next", hasNext)
-        } else {
-            if (listEntry instanceof Map) {
-                ec.contextStack.putAll((Map) listEntry)
-            } else {
-                ec.contextStack.put("listEntry", listEntry)
-            }
-            String listStr = formNode.attribute('list')
-            ec.contextStack.put(listStr + "_index", index)
-            ec.contextStack.put(listStr + "_has_next", hasNext)
-            ec.contextStack.put(listStr + "_entry", listEntry)
-        }
-        */
         // NOTE: this returns an empty String so that it can be used in an FTL interpolation, but nothing is written
         return ""
     }
@@ -1155,7 +1137,7 @@ class ScreenRenderImpl implements ScreenRender {
         if (subListEntry instanceof Map) {
             ec.contextStack.putAll((Map) subListEntry)
         } else {
-            ec.contextStack.put("subListEntry", subListEntry)
+            throw new IllegalArgumentException("Found form-list ${listRenderInfo.getFormNode().attribute('name')} sub-list entry that is not a Map, is a ${subListEntry.class.name} which should never happen after running list through list pre-processor")
         }
         String listStr = formNode.attribute('list')
         ec.contextStack.put(listStr + "_sub_index", index)
@@ -1201,9 +1183,9 @@ class ScreenRenderImpl implements ScreenRender {
     String getFieldValuePlainString(MNode fieldNodeWrapper, String defaultValue) {
         // NOTE: defaultValue is handled below so that for a plain string it is not run through expand
         Object obj = getFieldValue(fieldNodeWrapper, "")
-        if (StupidJavaUtilities.isEmpty(obj) && defaultValue != null && defaultValue.length() > 0)
+        if (ObjectUtilities.isEmpty(obj) && defaultValue != null && defaultValue.length() > 0)
             return ec.resourceFacade.expand(defaultValue, "")
-        return StupidJavaUtilities.toPlainString(obj)
+        return ObjectUtilities.toPlainString(obj)
         // NOTE: this approach causes problems with currency fields, but kills the string expand for default-value... a better approach?
         //return obj ? obj.toString() : (defaultValue ? ec.getResource().expand(defaultValue, null) : "")
     }
@@ -1218,7 +1200,7 @@ class ScreenRenderImpl implements ScreenRender {
             Map<String, Object> errorParameters = ec.getWeb()?.getErrorParameters()
             if (errorParameters != null && (errorParameters.moquiFormName == fieldNode.parent.attribute("name"))) {
                 value = errorParameters.get(fieldName)
-                if (!StupidJavaUtilities.isEmpty(value)) return value
+                if (!ObjectUtilities.isEmpty(value)) return value
             }
 
             // NOTE: field.@from attribute is handled for form-list in pre-processing done by AggregationUtil
@@ -1247,9 +1229,9 @@ class ScreenRenderImpl implements ScreenRender {
         }
 
         // the value == null check here isn't necessary but is the most common case so
-        if (value == null || StupidJavaUtilities.isEmpty(value)) {
+        if (value == null || ObjectUtilities.isEmpty(value)) {
             value = ec.contextStack.getByString(fieldName)
-            if (!StupidJavaUtilities.isEmpty(value)) return value
+            if (!ObjectUtilities.isEmpty(value)) return value
         } else {
             return value
         }

@@ -19,8 +19,9 @@ import freemarker.template.*;
 import groovy.lang.Closure;
 import groovy.util.Node;
 import groovy.util.NodeList;
+
 import org.moqui.BaseException;
-import org.moqui.context.ResourceReference;
+import org.moqui.resource.ResourceReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.Attributes;
@@ -41,7 +42,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 @SuppressWarnings("unused")
 public class MNode implements TemplateNodeModel, TemplateSequenceModel, TemplateHashModelEx, AdapterTemplateModel, TemplateScalarModel {
     protected final static Logger logger = LoggerFactory.getLogger(MNode.class);
-    public static final Version FTL_VERSION = Configuration.VERSION_2_3_25;
+    private static final Version FTL_VERSION = Configuration.VERSION_2_3_25;
 
     private final static Map<String, MNode> parsedNodeCache = new HashMap<>();
     public static void clearParsedNodeCache() { parsedNodeCache.clear(); }
@@ -60,17 +61,15 @@ public class MNode implements TemplateNodeModel, TemplateSequenceModel, Template
         return node;
     }
     /** Parse from an InputStream and close the stream */
-    @SuppressWarnings("ThrowFromFinallyBlock")
     public static MNode parse(String location, InputStream is) throws BaseException {
         if (is == null) return null;
         try {
             return parse(location, new InputSource(is));
         } finally {
             try { is.close(); }
-            catch (IOException e) { throw new BaseException("Error closing XML stream from " + location, e); }
+            catch (IOException e) { logger.error("Error closing XML stream from " + location, e); }
         }
     }
-    @SuppressWarnings("ThrowFromFinallyBlock")
     public static MNode parse(File fl) throws BaseException {
         if (fl == null || !fl.exists()) return null;
 
@@ -89,7 +88,7 @@ public class MNode implements TemplateNodeModel, TemplateSequenceModel, Template
             throw new BaseException("Error parsing XML file at " + fl.getPath(), e);
         } finally {
             try { if (fr != null) fr.close(); }
-            catch (IOException e) { throw new BaseException("Error closing XML file at " + fl.getPath(), e); }
+            catch (IOException e) { logger.error("Error closing XML file at " + fl.getPath(), e); }
         }
     }
     public static MNode parseText(String location, String text) throws BaseException {
@@ -173,7 +172,7 @@ public class MNode implements TemplateNodeModel, TemplateSequenceModel, Template
         }
     }
     /** Groovy specific method for square brace syntax */
-    public Object getAt(String name) { return get(name); }
+    public Object getAt(String name) { return getObject(name); }
 
     public String getName() { return nodeName; }
     public Map<String, String> getAttributes() { return attributeMap; }
@@ -304,7 +303,7 @@ public class MNode implements TemplateNodeModel, TemplateSequenceModel, Template
      * found or empty List if no nodes found */
     public Map<String, ArrayList<MNode>> descendants(Set<String> names) {
         Map<String, ArrayList<MNode>> nodes = new HashMap<>();
-        for (String name : names) nodes.put(name, new ArrayList<MNode>());
+        for (String name : names) nodes.put(name, new ArrayList<>());
         descendantsInternal(names, nodes);
         return nodes;
     }
@@ -846,7 +845,7 @@ public class MNode implements TemplateNodeModel, TemplateSequenceModel, Template
     // TemplateScalarModel methods
     @Override public String getAsString() { return childText != null ? childText : ""; }
 
-    public static class FtlAttributeWrapper implements TemplateNodeModel, TemplateSequenceModel, AdapterTemplateModel,
+    private static class FtlAttributeWrapper implements TemplateNodeModel, TemplateSequenceModel, AdapterTemplateModel,
             TemplateScalarModel {
         protected String key;
         protected String value;
@@ -882,7 +881,7 @@ public class MNode implements TemplateNodeModel, TemplateSequenceModel, Template
         @Override public String toString() { return value; }
     }
 
-    public static class FtlTextWrapper implements TemplateNodeModel, TemplateSequenceModel, AdapterTemplateModel, TemplateScalarModel {
+    private static class FtlTextWrapper implements TemplateNodeModel, TemplateSequenceModel, AdapterTemplateModel, TemplateScalarModel {
         protected String text;
         MNode parentNode;
         FtlTextWrapper(String text, MNode parentNode) {
@@ -915,7 +914,7 @@ public class MNode implements TemplateNodeModel, TemplateSequenceModel, Template
         @Override public String toString() { return getAsString(); }
     }
 
-    public static class FtlNodeListWrapper implements TemplateSequenceModel {
+    private static class FtlNodeListWrapper implements TemplateSequenceModel {
         ArrayList<TemplateModel> nodeList = new ArrayList<>();
         FtlNodeListWrapper(ArrayList<MNode> mnodeList, MNode parentNode) {
             if (mnodeList != null) for (int i = 0; i < mnodeList.size(); i++)

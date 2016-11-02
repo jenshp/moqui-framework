@@ -18,8 +18,6 @@ import groovy.transform.CompileStatic
 import org.moqui.BaseException
 import org.moqui.context.ExecutionContext
 import org.moqui.entity.*
-import org.moqui.impl.StupidJavaUtilities
-import org.moqui.impl.StupidUtilities
 import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
@@ -29,8 +27,10 @@ import org.moqui.impl.entity.AggregationUtil.AggregateField
 import org.moqui.impl.entity.EntityJavaUtil.RelationshipInfo
 import org.moqui.impl.screen.ScreenDefinition.TransitionItem
 import org.moqui.impl.service.ServiceDefinition
+import org.moqui.util.CollectionUtilities
 import org.moqui.util.ContextStack
 import org.moqui.util.MNode
+import org.moqui.util.ObjectUtilities
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -951,7 +951,7 @@ class ScreenForm {
                         if (listOption instanceof Map) {
                             addFieldOption(options, fieldNode, childNode, (Map) listOption, ec)
                         } else {
-                            String loString = StupidJavaUtilities.toPlainString(listOption)
+                            String loString = ObjectUtilities.toPlainString(listOption)
                             if (loString != null) options.put(loString, loString)
                             // addFieldOption(options, fieldNode, childNode, [entry:listOption], ec)
                         }
@@ -1033,6 +1033,7 @@ class ScreenForm {
         private boolean isFormHeaderFormVal = false
         private ArrayList<MNode> nonReferencedFieldList = (ArrayList<MNode>) null
         private ArrayList<MNode> hiddenFieldList = (ArrayList<MNode>) null
+        private ArrayList<String> hiddenFieldNameList = (ArrayList<String>) null
         private ArrayList<ArrayList<MNode>> formListColInfoList = (ArrayList<ArrayList<MNode>>) null
 
         boolean hasAggregate = false
@@ -1051,6 +1052,10 @@ class ScreenForm {
             allFieldNodes = formNode.children("field")
             int afnSize = allFieldNodes.size()
             allFieldNames = new ArrayList<>(afnSize)
+            if (isListForm) {
+                hiddenFieldList = new ArrayList<>()
+                hiddenFieldNameList = new ArrayList<>()
+            }
 
             // populate fieldNodeMap, get aggregation details
             ArrayList<String> aggregateGroupFieldList = (ArrayList<String>) null
@@ -1062,6 +1067,11 @@ class ScreenForm {
                 allFieldNames.add(fieldName)
 
                 if (isListForm) {
+                    if (isListFieldHidden(fieldNode)) {
+                        hiddenFieldList.add(fieldNode)
+                        if (!hiddenFieldNameList.contains(fieldName)) hiddenFieldNameList.add(fieldName)
+                    }
+
                     boolean isShowTotal = "true".equals(fieldNode.attribute("show-total"))
                     if (isShowTotal) {
                         if (showTotalFields == null) showTotalFields = new LinkedHashSet<>()
@@ -1212,7 +1222,7 @@ class ScreenForm {
             return fieldList
         }
 
-        boolean isHeaderSubmitField(MNode fieldNode) {
+        static boolean isHeaderSubmitField(MNode fieldNode) {
             MNode headerField = fieldNode.first("header-field")
             if (headerField == null) return false
             return headerField.hasChild("submit")
@@ -1230,7 +1240,7 @@ class ScreenForm {
             return false
         }
 
-        private boolean isListFieldHiddenWidget(MNode fieldNode) {
+        private static boolean isListFieldHiddenWidget(MNode fieldNode) {
             // if default-field or any conditional-field don't have hidden or ignored elements then it's not hidden
             MNode defaultField = fieldNode.first("default-field")
             if (defaultField != null && !defaultField.hasChild("hidden") && !defaultField.hasChild("ignored")) return false
@@ -1239,20 +1249,8 @@ class ScreenForm {
             return true
         }
 
-        ArrayList<MNode> getListHiddenFieldList() {
-            if (hiddenFieldList != null) return hiddenFieldList
-
-            ArrayList<MNode> fieldList = new ArrayList<>()
-            int afnSize = allFieldNodes.size()
-            for (int i = 0; i < afnSize; i++) {
-                MNode fieldNode = (MNode) allFieldNodes.get(i)
-                if (isListFieldHiddenWidget(fieldNode) && !isListFieldHiddenAttr(fieldNode)) fieldList.add(fieldNode)
-            }
-
-            hiddenFieldList = fieldList
-            return fieldList
-        }
-
+        ArrayList<MNode> getListHiddenFieldList() { return hiddenFieldList }
+        ArrayList<String> getListHiddenFieldNameList() { return hiddenFieldNameList }
         boolean hasFormListColumns() { return formNode.children("form-list-column").size() > 0 }
 
         String getUserActiveFormConfigId(ExecutionContext ec) {
@@ -1271,11 +1269,20 @@ class ScreenForm {
 
             return null
         }
+        static EntityValue getActiveFormListFind(ExecutionContextImpl ec) {
+            if (ec.web == null) return null
+            String formListFindId = ec.web.requestParameters.get("formListFindId")
+            if (!formListFindId) return null
+            return ec.entity.find("moqui.screen.form.FormListFind").condition("formListFindId", formListFindId).useCache(true).one()
+        }
 
         ArrayList<ArrayList<MNode>> getFormListColumnInfo() {
             ExecutionContextImpl eci = ecfi.getEci()
-            String formConfigId = getUserActiveFormConfigId(eci)
-            if (formConfigId) {
+            String formConfigId = (String) null
+            EntityValue activeFormListFind = getActiveFormListFind(eci)
+            if (activeFormListFind != null) formConfigId = activeFormListFind.getNoCheckSimple("formConfigId")
+            if (formConfigId == null || formConfigId.isEmpty()) formConfigId = getUserActiveFormConfigId(eci)
+            if (formConfigId != null && !formConfigId.isEmpty()) {
                 // don't remember the results of this, is per-user so good only once (FormInstance is NOT per user!)
                 return makeDbFormListColumnInfo(formConfigId, eci)
             }
@@ -1372,7 +1379,7 @@ class ScreenForm {
                 if (cs.containsKey(fn) || cs.containsKey(fn + "_op")) {
                     // this will handle text-line, text-find, etc
                     Object value = cs.get(fn)
-                    if (value != null && StupidJavaUtilities.isEmpty(value)) value = null
+                    if (value != null && ObjectUtilities.isEmpty(value)) value = null
                     String op = cs.get(fn + "_op") ?: "equals"
                     boolean not = (cs.get(fn + "_not") == "Y" || cs.get(fn + "_not") == "true")
                     boolean ic = (cs.get(fn + "_ic") == "Y" || cs.get(fn + "_ic") == "true")
@@ -1397,8 +1404,8 @@ class ScreenForm {
                     valueList.add(ev)
                 } else {
                     // these will handle range-find and date-find
-                    String fromValue = StupidJavaUtilities.toPlainString(cs.get(fn + "_from"))
-                    String thruValue = StupidJavaUtilities.toPlainString(cs.get(fn + "_thru"))
+                    String fromValue = ObjectUtilities.toPlainString(cs.get(fn + "_from"))
+                    String thruValue = ObjectUtilities.toPlainString(cs.get(fn + "_thru"))
                     if (fromValue || thruValue) {
                         EntityValue ev = ec.entity.makeValue("moqui.screen.form.FormListFindField")
                         ev.formListFindId = formListFindId
@@ -1427,8 +1434,6 @@ class ScreenForm {
         private ArrayList<ArrayList<MNode>> allColInfo
         private ArrayList<ArrayList<MNode>> mainColInfo = (ArrayList<ArrayList<MNode>>) null
         private ArrayList<ArrayList<MNode>> subColInfo = (ArrayList<ArrayList<MNode>>) null
-        private boolean hasMainTotals = false
-        private boolean hasSubTotals = false
         private LinkedHashSet<String> displayedFieldSet
 
         FormListRenderInfo(FormInstance formInstance) {
@@ -1466,18 +1471,14 @@ class ScreenForm {
                         if (aggField != null && aggField.subList) {
                             if (subFieldList == null) subFieldList = new ArrayList<>()
                             subFieldList.add(fieldNode)
-                            if (formInstance.showTotalFields.contains(fieldName)) hasSubTotals = true
                         } else {
                             newFieldList.add(fieldNode)
-                            if (formInstance.showTotalFields.contains(fieldName)) hasMainTotals = true
                         }
                     }
                     // if fieldList is not empty add to tempFormListColInfo
                     if (newFieldList.size() > 0) mainColInfo.add(newFieldList)
                     if (subFieldList != null) subColInfo.add(subFieldList)
                 }
-            } else {
-                hasMainTotals = formInstance.showTotalFields != null && formInstance.showTotalFields.size() > 0
             }
         }
 
@@ -1494,9 +1495,6 @@ class ScreenForm {
         ArrayList<MNode> getListHiddenFieldList() { return formInstance.getListHiddenFieldList() }
         LinkedHashSet<String> getDisplayedFields() { return displayedFieldSet }
 
-        boolean getHasMainTotals() { return hasMainTotals }
-        boolean getHasSubTotals() { return hasSubTotals }
-
         Object getListObject(boolean aggregateList) {
             Object listObject
             String listName = formInstance.formNode.attribute("list")
@@ -1508,6 +1506,9 @@ class ScreenForm {
                 // if (ef.getSelectFields() == null || ef.getSelectFields().size() == 0) {
                 // always do this even if there are some entity-find.select-field elements, support specifying some fields that are always selected
                 for (String fieldName in displayedFieldSet) ef.selectField(fieldName)
+                ArrayList<String> hiddenNames = formInstance.getListHiddenFieldNameList()
+                int hiddenNamesSize = hiddenNames.size()
+                for (int i = 0; i < hiddenNamesSize; i++) { String fn = (String) hiddenNames.get(i); ef.selectField(fn); }
 
                 // logger.info("TOREMOVE form-list.entity-find: ${ef.toString()}")
 
@@ -1585,15 +1586,9 @@ class ScreenForm {
                 flfInfoList.add(getFormListFindInfo(formListFindId, ec, userOnlyFlfIdSet))
 
             // sort by description
-            StupidUtilities.orderMapList(flfInfoList, ["description"])
+            CollectionUtilities.orderMapList(flfInfoList, ["description"])
 
             return flfInfoList
-        }
-        EntityValue getActiveFormListFind(ExecutionContextImpl ec) {
-            if (ec.web == null) return null
-            String formListFindId = ec.web.requestParameters.get("formListFindId")
-            if (!formListFindId) return null
-            return ec.entity.find("moqui.screen.form.FormListFind").condition("formListFindId", formListFindId).useCache(true).one()
         }
         String getOrderByActualJsString(String originalOrderBy) {
             if (originalOrderBy == null || originalOrderBy.length() == 0) return "";
@@ -1752,21 +1747,22 @@ class ScreenForm {
         int flffSize = flffList.size()
         for (int i = 0; i < flffSize; i++) {
             EntityValue flff = (EntityValue) flffList.get(i)
-            String fn = flff.fieldName
-            if (flff.fieldValue) {
-                parmMap.put(fn, (String) flff.fieldValue)
-                String op = (String) flff.fieldOperator
+            String fn = (String) flff.getNoCheckSimple("fieldName")
+            String fieldValue = (String) flff.getNoCheckSimple("fieldValue")
+            if (fieldValue != null && !fieldValue.isEmpty()) {
+                parmMap.put(fn, fieldValue)
+                String op = (String) flff.getNoCheckSimple("fieldOperator")
                 if (op && !"equals".equals(op)) parmMap.put(fn + "_op", op)
-                String not = (String) flff.fieldNot
+                String not = (String) flff.getNoCheckSimple("fieldNot")
                 if ("Y".equals(not)) parmMap.put(fn + "_not", "Y")
-                String ic = (String) flff.fieldIgnoreCase
+                String ic = (String) flff.getNoCheckSimple("fieldIgnoreCase")
                 if ("Y".equals(ic)) parmMap.put(fn + "_ic", "Y")
-            } else if (flff.fieldPeriod) {
-                parmMap.put(fn + "_period", (String) flff.fieldPeriod)
-                parmMap.put(fn + "_poffset", flff.fieldPerOffset as String)
-            } else if (flff.fieldFrom || flff.fieldThru) {
-                if (flff.fieldFrom) parmMap.put(fn + "_from", (String) flff.fieldFrom)
-                if (flff.fieldThru) parmMap.put(fn + "_thru", (String) flff.fieldThru)
+            } else if (flff.getNoCheckSimple("fieldPeriod")) {
+                parmMap.put(fn + "_period", (String) flff.getNoCheckSimple("fieldPeriod"))
+                parmMap.put(fn + "_poffset", flff.getNoCheckSimple("fieldPerOffset") as String)
+            } else if (flff.getNoCheckSimple("fieldFrom") || flff.getNoCheckSimple("fieldThru")) {
+                if (flff.fieldFrom) parmMap.put(fn + "_from", (String) flff.getNoCheckSimple("fieldFrom"))
+                if (flff.fieldThru) parmMap.put(fn + "_thru", (String) flff.getNoCheckSimple("fieldThru"))
             }
         }
         return parmMap
@@ -1833,10 +1829,17 @@ class ScreenForm {
         if (screenForm == null) { ec.message.addError("Form ${formName} not found in screen at ${screenLocation}, cannot process saved find"); return null; }
         FormInstance formInstance = screenForm.getFormInstance()
 
-        // see if there is an existing FormConfig record
+        String formConfigId = formInstance.getUserActiveFormConfigId(ec)
+        EntityList formConfigFieldList = null
+        if (formConfigId) {
+            formConfigFieldList = ec.entityFacade.find("moqui.screen.form.FormConfigField")
+                    .condition("formConfigId", formConfigId).useCache(true).list()
+        }
+
+        // see if there is an existing FormListFind record
         if (flf != null) {
             // make sure the FormListFind.formLocation matches the current formLocation
-            if (formLocation != flf.formLocation) {
+            if (!formLocation.equals(flf.getNoCheckSimple("formLocation"))) {
                 ec.message.addError("Specified form location did not match form on Saved Find ${formListFindId}, not updating")
                 return null
             }
@@ -1854,21 +1857,41 @@ class ScreenForm {
                 }
             }
 
+            // save the FormConfig fields if needed, create a new FormConfig for the FormListFind or removing existing as needed
+            if (formConfigFieldList != null && formConfigFieldList.size() > 0) {
+                String flfFormConfigId = (String) flf.getNoCheckSimple("formConfigId")
+                if (flfFormConfigId != null && !flfFormConfigId.isEmpty()) {
+                    ec.entity.find("moqui.screen.form.FormConfigField").condition("formConfigId", flfFormConfigId).deleteAll()
+                } else {
+                    EntityValue formConfig = ec.entity.makeValue("moqui.screen.form.FormConfig").set("formLocation", formLocation)
+                            .setSequencedIdPrimary().create()
+                    flf.formConfigId = formConfig.getNoCheckSimple("formConfigId")
+                }
+                for (EntityValue fcf in formConfigFieldList) fcf.cloneValue().set("formConfigId", flfFormConfigId).create()
+            }
+
             if (cs.description) flf.description = cs.description
             if (cs.orderByField) flf.orderByField = cs.orderByField
             if (flf.isModified()) flf.update()
 
             // remove all FormListFindField records and create new ones
-            ec.entity.find("moqui.screen.form.FormListFindField")
-                    .condition("formListFindId", formListFindId).deleteAll()
-
+            ec.entity.find("moqui.screen.form.FormListFindField").condition("formListFindId", formListFindId).deleteAll()
             ArrayList<EntityValue> flffList = formInstance.makeFormListFindFields(formListFindId, ec)
             for (EntityValue flff in flffList) flff.create()
         } else {
+            // if there are FormConfig fields save in a new FormConfig first so we can set the formConfigId later
+            EntityValue formConfig = null
+            if (formConfigFieldList != null && formConfigFieldList.size() > 0) {
+                formConfig = ec.entity.makeValue("moqui.screen.form.FormConfig").set("formLocation", formLocation)
+                        .setSequencedIdPrimary().create()
+                for (EntityValue fcf in formConfigFieldList) fcf.cloneValue().set("formConfigId", formConfig.formConfigId).create()
+            }
+
             flf = ec.entity.makeValue("moqui.screen.form.FormListFind")
             flf.formLocation = formLocation
             flf.description = cs.description ?: "${ec.user.username} - ${ec.l10n.format(ec.user.nowTimestamp, "yyyy-MM-dd HH:mm")}"
             if (cs.orderByField) flf.orderByField = cs.orderByField
+            if (formConfig != null) flf.formConfigId = formConfig.formConfigId
             flf.setSequencedIdPrimary()
             flf.create()
 
@@ -1954,12 +1977,12 @@ class ScreenForm {
         JsonSlurper slurper = new JsonSlurper()
         List<Map> columnsTree = (List<Map>) slurper.parseText(columnsTreeStr)
 
-        StupidUtilities.orderMapList(columnsTree, ['order'])
+        CollectionUtilities.orderMapList(columnsTree, ['order'])
         int columnIndex = 0
         for (Map columnMap in columnsTree) {
             if (columnMap.get("id") == "hidden") continue
             List<Map> children = (List<Map>) columnMap.get("children")
-            StupidUtilities.orderMapList(children, ['order'])
+            CollectionUtilities.orderMapList(children, ['order'])
             int columnSequence = 0
             for (Map fieldMap in children) {
                 String fieldName = (String) fieldMap.get("id")
