@@ -11,12 +11,14 @@
  * along with this software (see the LICENSE.md file). If not, see
  * <http://creativecommons.org/publicdomain/zero/1.0/>.
  */
-package org.moqui.impl;
+package org.moqui.util;
 
 import java.io.*;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.security.CodeSource;
 import java.security.ProtectionDomain;
+import java.security.cert.Certificate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.Attributes;
@@ -32,12 +34,15 @@ import java.util.jar.Manifest;
  *
  * This loads classes from the parent first, then its class directories and JAR files.
  */
-public class StupidClassLoader extends ClassLoader {
+public class MClassLoader extends ClassLoader {
     private static final boolean checkJars = false;
+    // rememberClassNotFound causes problems with Groovy that tries to load variations on class names, then creates them, then tries again
     private static final boolean rememberClassNotFound = false;
     private static final boolean rememberResourceNotFound = true;
+    // don't track known: with a few tool components in place uses 20MB memory and really doesn't help start/etc time much:
+    private static boolean trackKnown = false;
 
-    public static final Map<String, Class<?>> commonJavaClassesMap = createCommonJavaClassesMap();
+    private static final Map<String, Class<?>> commonJavaClassesMap = createCommonJavaClassesMap();
     private static Map<String, Class<?>> createCommonJavaClassesMap() {
         Map<String, Class<?>> m = new HashMap<>();
         m.put("java.lang.String",java.lang.String.class); m.put("String", java.lang.String.class);
@@ -71,21 +76,23 @@ public class StupidClassLoader extends ClassLoader {
         m.put(Integer.TYPE.getName(), Integer.TYPE); m.put(Long.TYPE.getName(), Long.TYPE);
         m.put(Float.TYPE.getName(), Float.TYPE); m.put(Double.TYPE.getName(), Double.TYPE);
         m.put(Byte.TYPE.getName(), Byte.TYPE); m.put(Character.TYPE.getName(), Character.TYPE);
-        m.put("org.moqui.entity.EntityValue", org.moqui.entity.EntityValue.class); m.put("EntityValue", org.moqui.entity.EntityValue.class);
-        m.put("org.moqui.entity.EntityList", org.moqui.entity.EntityList.class); m.put("EntityList", org.moqui.entity.EntityList.class);
         m.put("long[]", long[].class); m.put("char[]", char[].class);
         return m;
     }
 
+    public static Class<?> getCommonClass(String className) { return commonJavaClassesMap.get(className); }
+    public static void addCommonClass(String className, Class<?> cls) { commonJavaClassesMap.putIfAbsent(className, cls); }
+
     private final ArrayList<JarFile> jarFileList = new ArrayList<>();
+    private final Map<String, URL> jarLocationByJarName = new HashMap<>();
     private final ArrayList<File> classesDirectoryList = new ArrayList<>();
+    private final Map<String, String> jarByClass = new HashMap<>();
 
     private final HashMap<String, File> knownClassFiles = new HashMap<>();
     private final HashMap<String, JarEntryInfo> knownClassJarEntries = new HashMap<>();
     private static class JarEntryInfo {
-        JarEntry entry;
-        JarFile file;
-        JarEntryInfo(JarEntry je, JarFile jf) { entry = je; file = jf; }
+        JarEntry entry; JarFile file; URL jarLocation;
+        JarEntryInfo(JarEntry je, JarFile jf, URL loc) { entry = je; file = jf; jarLocation = loc; }
     }
 
 
@@ -97,7 +104,7 @@ public class StupidClassLoader extends ClassLoader {
     private final Set<String> resourcesNotFound = new HashSet<>();
     private ProtectionDomain pd;
 
-    public StupidClassLoader(ClassLoader parent) {
+    public MClassLoader(ClassLoader parent) {
         super(parent);
 
         if (parent == null) throw new IllegalArgumentException("Parent ClassLoader cannot be null");
@@ -108,9 +115,9 @@ public class StupidClassLoader extends ClassLoader {
             classCache.put(commonClassEntry.getKey(), commonClassEntry.getValue());
     }
 
-    private static final Map<String, String> jarByClass = new HashMap<>();
-    public void addJarFile(JarFile jf) {
+    public void addJarFile(JarFile jf, URL jarLocation) {
         jarFileList.add(jf);
+        jarLocationByJarName.put(jf.getName(), jarLocation);
 
         String jfName = jf.getName();
         Enumeration<JarEntry> jeEnum = jf.entries();
@@ -125,7 +132,7 @@ public class StupidClassLoader extends ClassLoader {
                 System.out.println("Ignoring duplicate class " + className + " in jar " + jfName);
                 continue;
             }
-            knownClassJarEntries.put(className, new JarEntryInfo(je, jf));
+            if (trackKnown) knownClassJarEntries.put(className, new JarEntryInfo(je, jf, jarLocation));
 
             /* NOTE: can't do this as classes are defined out of order, end up with NoClassDefFoundError for dependencies:
             Class<?> cls = makeClass(className, jf, je);
@@ -170,7 +177,7 @@ public class StupidClassLoader extends ClassLoader {
                     System.out.println("Ignoring duplicate class " + className + " at " + child.getPath());
                     continue;
                 }
-                knownClassFiles.put(className, child);
+                if (trackKnown) knownClassFiles.put(className, child);
 
                 /* NOTE: can't do this as classes are defined out of order, end up with NoClassDefFoundError for dependencies:
                 Class<?> cls = makeClass(className, child);
@@ -352,15 +359,17 @@ public class StupidClassLoader extends ClassLoader {
 
             if (c == null) {
                 try {
-                    File classFile = knownClassFiles.get(className);
-                    if (classFile != null) c = makeClass(className, classFile);
-                    if (c == null) {
-                        JarEntryInfo jei = knownClassJarEntries.get(className);
-                        if (jei != null) c = makeClass(className, jei.file, jei.entry);
+                    if (trackKnown) {
+                        File classFile = knownClassFiles.get(className);
+                        if (classFile != null) c = makeClass(className, classFile);
+                        if (c == null) {
+                            JarEntryInfo jei = knownClassJarEntries.get(className);
+                            if (jei != null) c = makeClass(className, jei.file, jei.entry, jei.jarLocation);
+                        }
                     }
 
-                    // old approach search through all class dirs and jars
-                    // c = findJarClass(className);
+                    // not found in known? search through all
+                    c = findJarClass(className);
                 } catch (Exception e) {
                     System.out.println("Error loading class [" + className + "] from additional jars: " + e.toString());
                     e.printStackTrace();
@@ -393,6 +402,16 @@ public class StupidClassLoader extends ClassLoader {
         }
     }
 
+    private ConcurrentHashMap<URL, ProtectionDomain> protectionDomainByUrl = new ConcurrentHashMap<>();
+    private ProtectionDomain getProtectionDomain(URL jarLocation) {
+        ProtectionDomain curPd = protectionDomainByUrl.get(jarLocation);
+        if (curPd != null) return curPd;
+        CodeSource codeSource = new CodeSource(jarLocation, (Certificate[]) null);
+        ProtectionDomain newPd = new ProtectionDomain(codeSource, null, this, null);
+        ProtectionDomain existingPd = protectionDomainByUrl.putIfAbsent(jarLocation, newPd);
+        return existingPd != null ? existingPd : newPd;
+    }
+
     private Class<?> makeClass(String className, File classFile) {
         try {
             byte[] jeBytes = getFileBytes(classFile);
@@ -406,7 +425,7 @@ public class StupidClassLoader extends ClassLoader {
             return null;
         }
     }
-    private Class<?> makeClass(String className, JarFile file, JarEntry entry) {
+    private Class<?> makeClass(String className, JarFile file, JarEntry entry, URL jarLocation) {
         try {
             definePackage(className, file);
             byte[] jeBytes = getJarEntryBytes(file, entry);
@@ -415,7 +434,7 @@ public class StupidClassLoader extends ClassLoader {
                 return null;
             } else {
                 // System.out.println("Loading class " + className + " from " + entry.getName() + " in " + file.getName());
-                return defineClass(className, jeBytes, 0, jeBytes.length, pd);
+                return defineClass(className, jeBytes, 0, jeBytes.length, jarLocation != null ? getProtectionDomain(jarLocation) : pd);
             }
         } catch (Throwable t) {
             System.out.println("Error reading class file " + entry.getName() + " in jar" + file.getName() + ": " + t.toString());
@@ -487,7 +506,7 @@ public class StupidClassLoader extends ClassLoader {
                 // System.out.println("Finding class file " + classFileName + " in jar file " + jarFile.getName());
                 JarEntry jarEntry = jarFile.getJarEntry(classFileName);
                 if (jarEntry != null) {
-                    c = makeClass(className, jarFile, jarEntry);
+                    c = makeClass(className, jarFile, jarEntry, jarLocationByJarName.get(jarFile.getName()));
                     break;
                 }
             }

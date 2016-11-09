@@ -19,7 +19,9 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.security.CodeSource;
 import java.security.ProtectionDomain;
+import java.security.cert.Certificate;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -51,11 +53,13 @@ public class MoquiStart {
             Runtime.getRuntime().addShutdownHook(new MoquiShutdown(null, null, moquiStartLoader));
             initSystemProperties(moquiStartLoader, false);
 
+            /* nice for debugging, messy otherwise:
             System.out.println("Internal Class Path Jars:");
             for (JarFile jf: moquiStartLoader.jarFileList) {
                 String fn = jf.getName();
                 System.out.println(fn.contains("moqui_temp") ? fn.substring(fn.indexOf("moqui_temp")) : fn);
             }
+            */
             System.out.println("------------------------------------------------");
             System.out.println("Current runtime directory (moqui.runtime): " + System.getProperty("moqui.runtime"));
             System.out.println("Current configuration file (moqui.conf): " + System.getProperty("moqui.conf"));
@@ -124,7 +128,7 @@ public class MoquiStart {
         if (firstArg.endsWith("load")) {
             StartClassLoader moquiStartLoader = new StartClassLoader(true);
             Thread.currentThread().setContextClassLoader(moquiStartLoader);
-            Runtime.getRuntime().addShutdownHook(new MoquiShutdown(null, null, moquiStartLoader));
+            // Runtime.getRuntime().addShutdownHook(new MoquiShutdown(null, null, moquiStartLoader));
             initSystemProperties(moquiStartLoader, false);
 
             String overrideConf = argMap.get("conf");
@@ -147,10 +151,12 @@ public class MoquiStart {
         // Get a start loader with loadWebInf=false since the container will load those we don't want to here (would be on classpath twice)
         StartClassLoader moquiStartLoader = new StartClassLoader(reportJarsUnused);
         Thread.currentThread().setContextClassLoader(moquiStartLoader);
-        // NOTE: using shutdown hook to close files only:
-        Thread shutdownHook = new MoquiShutdown(null, null, moquiStartLoader);
-        shutdownHook.setDaemon(true);
-        Runtime.getRuntime().addShutdownHook(shutdownHook);
+
+        // NOTE: not using MoquiShutdown hook any more, let Jetty stop everything
+        //   may need to add back for jar file close, cleaner delete on exit
+        // Thread shutdownHook = new MoquiShutdown(null, null, moquiStartLoader);
+        // shutdownHook.setDaemon(true);
+        // Runtime.getRuntime().addShutdownHook(shutdownHook);
 
         initSystemProperties(moquiStartLoader, true);
 
@@ -231,6 +237,10 @@ public class MoquiStart {
             int minThreads = (int) sizedThreadPoolClass.getMethod("getMinThreads").invoke(threadPool);
             int maxThreads = (int) sizedThreadPoolClass.getMethod("getMaxThreads").invoke(threadPool);
             System.out.println("Jetty min threads " + minThreads + ", max threads " + maxThreads);
+
+            // Tell Jetty to stop on JVM shutdown
+            serverClass.getMethod("setStopAtShutdown", boolean.class).invoke(server, true);
+            serverClass.getMethod("setStopTimeout", long.class).invoke(server, 30000L);
 
             // Start
             serverClass.getMethod("start").invoke(server);
@@ -428,6 +438,7 @@ public class MoquiStart {
         private URL wrapperUrl = null;
         private boolean isInWar = true;
         final ArrayList<JarFile> jarFileList = new ArrayList<>();
+        private final Map<String, URL> jarLocationByJarName = new HashMap<>();
         private final Map<String, Class<?>> classCache = new HashMap<>();
         private final Map<String, URL> resourceCache = new HashMap<>();
         private ProtectionDomain pd;
@@ -456,6 +467,7 @@ public class MoquiStart {
 
                     // allow for classes in the outerFile as well
                     jarFileList.add(outerFile);
+                    jarLocationByJarName.put(outerFile.getName(), wrapperUrl);
 
                     Enumeration<JarEntry> jarEntries = outerFile.entries();
                     while (jarEntries.hasMoreElements()) {
@@ -467,14 +479,18 @@ public class MoquiStart {
                         String jeName = je.getName().toLowerCase();
                         if (jeName.lastIndexOf(".jar") == jeName.length() - 4) {
                             File file = createTempFile(outerFile, je);
-                            jarFileList.add(new JarFile(file));
+                            JarFile newJarFile = new JarFile(file);
+                            jarFileList.add(newJarFile);
+                            jarLocationByJarName.put(newJarFile.getName(), file.toURI().toURL());
                         }
                     }
                 } else {
                     ArrayList<File> jarList = new ArrayList<>();
                     addJarFilesNested(wrapperFile, jarList, loadWebInf);
                     for (File jarFile : jarList) {
-                        jarFileList.add(new JarFile(jarFile));
+                        JarFile newJarFile = new JarFile(jarFile);
+                        jarFileList.add(newJarFile);
+                        jarLocationByJarName.put(newJarFile.getName(), jarFile.toURI().toURL());
                         // System.out.println("jar file: " + jarFile.getAbsolutePath());
                     }
                 }
@@ -483,6 +499,16 @@ public class MoquiStart {
             }
 
             if (reportJarsUnused) for (JarFile jf : jarFileList) jarsUnused.add(jf.getName());
+        }
+
+        private ConcurrentHashMap<URL, ProtectionDomain> protectionDomainByUrl = new ConcurrentHashMap<>();
+        private ProtectionDomain getProtectionDomain(URL jarLocation) {
+            ProtectionDomain curPd = protectionDomainByUrl.get(jarLocation);
+            if (curPd != null) return curPd;
+            CodeSource codeSource = new CodeSource(jarLocation, (Certificate[]) null);
+            ProtectionDomain newPd = new ProtectionDomain(codeSource, null, this, null);
+            ProtectionDomain existingPd = protectionDomainByUrl.putIfAbsent(jarLocation, newPd);
+            return existingPd != null ? existingPd : newPd;
         }
 
         private void addJarFilesNested(File file, List<File> jarList, boolean loadWebInf) {
@@ -652,7 +678,8 @@ public class MoquiStart {
                         continue;
                     }
                     // System.out.println("Class [" + classFileName + "] FOUND in jarFile [" + jarFile.getName() + "], size is " + (jeBytes == null ? "null" : jeBytes.length));
-                    c = defineClass(className, jeBytes, 0, jeBytes.length, pd);
+                    URL jarLocation = jarLocationByJarName.get(jarFile.getName());
+                    c = defineClass(className, jeBytes, 0, jeBytes.length, jarLocation != null ? getProtectionDomain(jarLocation) : pd);
                     break;
                 }
             }
