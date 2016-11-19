@@ -162,7 +162,7 @@ class UserFacadeImpl implements UserFacade {
                     // whether it existed or not, add it again to keep it fresh; stale cookies get thrown away
                     Cookie visitorCookie = new Cookie("moqui.visitor", cookieVisitorId)
                     visitorCookie.setMaxAge(60 * 60 * 24 * 365)
-                    visitorCookie.setPath("/")
+                    visitorCookie.setPath(eci.web.getWebappRootUrl(false, null))
                     response.addCookie(visitorCookie)
                 }
             }
