@@ -20,7 +20,6 @@ import org.moqui.BaseException
 import org.moqui.context.*
 import org.moqui.entity.EntityCondition.ComparisonOperator
 import org.moqui.entity.EntityException
-import org.moqui.entity.EntityFacade
 import org.moqui.entity.EntityList
 import org.moqui.entity.EntityListIterator
 import org.moqui.entity.EntityValue
@@ -185,6 +184,37 @@ class ScreenRenderImpl implements ScreenRender {
             if (logger.isInfoEnabled()) logger.info("Redirecting to ${redirectUrl} instead of rendering ${this.getScreenUrlInfo().getFullPathNameList()}")
         }
     }
+    boolean sendJsonRedirect(UrlInstance fullUrl) {
+        if ("json".equals(screenUrlInfo.targetTransitionExtension) || "application/json".equals(request?.getHeader("Accept"))) {
+            Map<String, Object> responseMap = new HashMap<>()
+            // add saveMessagesToSession, saveRequestParametersToSession/saveErrorParametersToSession data
+            // add all plain object data from session?
+            if (ec.message.getMessages().size() > 0) responseMap.put("messages", ec.message.messages)
+            if (ec.message.getErrors().size() > 0) responseMap.put("errors", ec.message.errors)
+            if (ec.message.getValidationErrors().size() > 0) {
+                List<ValidationError> valErrorList = ec.message.getValidationErrors()
+                int valErrorListSize = valErrorList.size()
+                ArrayList<Map> valErrMapList = new ArrayList<>(valErrorListSize)
+                for (int i = 0; i < valErrorListSize; i++) valErrMapList.add(valErrorList.get(i).getMap())
+                responseMap.put("validationErrors", valErrMapList)
+            }
+
+            Map parms = new HashMap()
+            if (ec.web.requestParameters != null) parms.putAll(ec.web.requestParameters)
+            if (ec.web.requestAttributes != null) parms.putAll(ec.web.requestAttributes)
+            responseMap.put("currentParameters", ContextJavaUtil.unwrapMap(parms))
+
+            // add screen path, parameters from fullUrl
+            responseMap.put("screenPathList", fullUrl.sui.fullPathNameList)
+            responseMap.put("screenParameters", fullUrl.getParameterMap())
+            responseMap.put("screenUrl", fullUrl.getPathWithParams())
+
+            ec.web.sendJsonResponse(responseMap)
+            return true
+        } else {
+            return false
+        }
+    }
 
     protected ResponseItem recursiveRunTransition(Iterator<ScreenDefinition> sdIterator, boolean runPreActions) {
         ScreenDefinition sd = sdIterator.next()
@@ -242,7 +272,7 @@ class ScreenRenderImpl implements ScreenRender {
         WebFacade web = ec.getWeb()
         String lastStandalone = web != null ? web.requestParameters.lastStandalone : null
         screenUrlInfo = ScreenUrlInfo.getScreenUrlInfo(this, rootScreenDef, originalScreenPathNameList, null,
-                "true".equals(lastStandalone))
+                ScreenUrlInfo.parseLastStandalone(lastStandalone, 0))
 
         // if the target of the url doesn't exist throw exception
         screenUrlInfo.checkExists()
@@ -454,31 +484,7 @@ class ScreenRenderImpl implements ScreenRender {
                         }
                     }
 
-                    if ("json".equals(screenUrlInfo.targetTransitionExtension)) {
-                        Map<String, Object> responseMap = new HashMap<>()
-                        // add saveMessagesToSession, saveRequestParametersToSession/saveErrorParametersToSession data
-                        // add all plain object data from session?
-                        if (ec.message.getMessages().size() > 0) responseMap.put("messages", ec.message.messages)
-                        if (ec.message.getErrors().size() > 0) responseMap.put("errors", ec.message.errors)
-                        if (ec.message.getValidationErrors().size() > 0) {
-                            List<ValidationError> valErrorList = ec.message.getValidationErrors()
-                            int valErrorListSize = valErrorList.size()
-                            ArrayList<Map> valErrMapList = new ArrayList<>(valErrorListSize)
-                            for (int i = 0; i < valErrorListSize; i++) valErrMapList.add(valErrorList.get(i).getMap())
-                            responseMap.put("validationErrors", valErrMapList)
-                        }
-
-                        Map parms = new HashMap()
-                        if (web.requestParameters != null) parms.putAll(web.requestParameters)
-                        if (web.requestAttributes != null) parms.putAll(web.requestAttributes)
-                        responseMap.put("currentParameters", ContextJavaUtil.unwrapMap(parms))
-
-                        // add screen path, parameters from fullUrl
-                        responseMap.put("screenPathList", fullUrl.sui.fullPathNameList)
-                        responseMap.put("screenParameters", fullUrl.getParameterMap())
-
-                        web.sendJsonResponse(responseMap)
-                    } else {
+                    if (!sendJsonRedirect(fullUrl)) {
                         String fullUrlString = fullUrl.getMinimalPathUrlWithParams()
                         if (logger.isInfoEnabled()) logger.info("Transition ${screenUrlInfo.getFullPathNameList().join("/")} in ${System.currentTimeMillis() - renderStartTime}ms, redirecting to screen path URL: ${fullUrlString}")
                         response.sendRedirect(fullUrlString)
@@ -774,7 +780,7 @@ class ScreenRenderImpl implements ScreenRender {
                 if (loginPathAttr) loginPath = loginPathAttr
             }
 
-            if (screenUrlInfo.isLastStandalone() || screenUrlInstance.getTargetTransition() != null) {
+            if (screenUrlInfo.lastStandalone != 0 || screenUrlInstance.getTargetTransition() != null) {
                 // respond with 401 and the login screen instead of a redirect; JS client libraries handle this much better
                 ArrayList<String> pathElements = new ArrayList(Arrays.asList(loginPath.split("/")))
                 if (loginPath.startsWith("/")) {
@@ -790,7 +796,7 @@ class ScreenRenderImpl implements ScreenRender {
                 return false
             } else {
                 // now prepare and send the redirect
-                ScreenUrlInfo suInfo = ScreenUrlInfo.getScreenUrlInfo(this, rootScreenDef, new ArrayList<String>(), loginPath, false)
+                ScreenUrlInfo suInfo = ScreenUrlInfo.getScreenUrlInfo(this, rootScreenDef, new ArrayList<String>(), loginPath, 0)
                 UrlInstance urlInstance = suInfo.getInstance(this, false)
                 response.sendRedirect(urlInstance.url)
                 return false
@@ -1035,7 +1041,7 @@ class ScreenRenderImpl implements ScreenRender {
             // logger.warn("========== DID NOT find cached ScreenUrlInfo ${key}")
         }
 
-        ScreenUrlInfo sui = ScreenUrlInfo.getScreenUrlInfo(this, null, null, subscreenPath, null)
+        ScreenUrlInfo sui = ScreenUrlInfo.getScreenUrlInfo(this, null, null, subscreenPath, 0)
         subscreenUrlInfos.put(key, sui)
         return sui
     }
@@ -1045,7 +1051,7 @@ class ScreenRenderImpl implements ScreenRender {
     }
     UrlInstance buildUrl(ScreenDefinition fromSd, ArrayList<String> fromPathList, String subscreenPathOrig) {
         String subscreenPath = subscreenPathOrig?.contains("\${") ? ec.resource.expand(subscreenPathOrig, "") : subscreenPathOrig
-        ScreenUrlInfo ui = ScreenUrlInfo.getScreenUrlInfo(this, fromSd, fromPathList, subscreenPath, null)
+        ScreenUrlInfo ui = ScreenUrlInfo.getScreenUrlInfo(this, fromSd, fromPathList, subscreenPath, 0)
         return ui.getInstance(this, null)
     }
 
@@ -1163,7 +1169,7 @@ class ScreenRenderImpl implements ScreenRender {
         String defaultValue = widgetNode.attribute("default-value")
         if (defaultValue == null) defaultValue = ""
         String format = widgetNode.attribute("format")
-        if ("text".equals(renderMode)) {
+        if ("text".equals(renderMode) || "csv".equals(renderMode)) {
             String textFormat = widgetNode.attribute("text-format")
             if (textFormat != null && !textFormat.isEmpty()) format = textFormat
         }
@@ -1366,7 +1372,8 @@ class ScreenRenderImpl implements ScreenRender {
         ArrayList<String> values = new ArrayList<>(strListSize)
         for (int i = 0; i < strListSize; i++) {
             EntityValue str = (EntityValue) strList.get(i)
-            values.add((String) str.getNoCheckSimple("resourceValue"))
+            String resourceValue = (String) str.getNoCheckSimple("resourceValue")
+            if (resourceValue != null && !resourceValue.isEmpty()) values.add(resourceValue)
         }
 
         curThemeValuesByType.put(resourceTypeEnumId, values)
@@ -1392,5 +1399,81 @@ class ScreenRenderImpl implements ScreenRender {
 
         curThemeIconByText.put(text, iconClass)
         return iconClass
+    }
+
+    List<Map> getMenuData(ArrayList<String> pathNameList) {
+        ScreenUrlInfo fullUrlInfo = ScreenUrlInfo.getScreenUrlInfo(this, rootScreenDef, pathNameList, null, 0)
+        if (!fullUrlInfo.targetExists) {
+            ec.web.response.sendError(404, "Screen not found for path ${pathNameList}")
+            return null
+        }
+        ArrayList<String> extraPath = fullUrlInfo.fullPathNameList
+        int extraPathSize = extraPath.size()
+
+        StringBuilder currentPath = new StringBuilder()
+        List<Map> menuDataList = new LinkedList<>()
+        ScreenDefinition curScreen = rootScreenDef
+
+        for (int i = 0; i < (extraPathSize - 1); i++) {
+            String pathItem = (String) extraPath.get(i)
+            String nextItem = (String) extraPath.get(i+1)
+            currentPath.append('/').append(pathItem)
+
+            SubscreensItem curSsi = curScreen.getSubscreensItem(pathItem)
+            // already checked for exists above, path may have extra path elements beyond the screen so allow it
+            if (curSsi == null) break;
+            curScreen = ec.screenFacade.getScreenDefinition(curSsi.location)
+
+            List<Map> subscreensList = new LinkedList<>()
+            ArrayList<SubscreensItem> menuItems = curScreen.getMenuSubscreensItems()
+            int menuItemsSize = menuItems.size()
+            for (int j = 0; j < menuItemsSize; j++) {
+                SubscreensItem subscreensItem = (SubscreensItem) menuItems.get(j)
+                String screenPath = new StringBuilder(currentPath).append('/').append(subscreensItem.name).toString()
+                UrlInstance screenUrlInstance = buildUrl(screenPath)
+                if (!screenUrlInstance.isPermitted()) continue
+
+                String urlWithParams = screenPath
+                ScreenDefinition screenDef = screenUrlInstance.sui.targetScreen
+                if (screenDef.hasRequired) {
+                    Map<String, String> parmMap = screenUrlInstance.getParameterMap()
+                    boolean parmMissing = false
+                    for (ScreenDefinition.ParameterItem pi in screenDef.getParameterMap().values()) {
+                        String parmValue = parmMap.get(pi.name)
+                        if (parmValue == null || parmValue.isEmpty()) { parmMissing = true; break }
+                    }
+                    if (parmMissing) continue
+                    urlWithParams += '?' + screenUrlInstance.getParameterString()
+                }
+
+                String image = screenUrlInstance.sui.menuImage
+                String imageType = screenUrlInstance.sui.menuImageType
+                if (image != null && image.length() > 0 && (imageType == null || imageType.length() == 0 || "url-screen".equals(imageType)))
+                    image = buildUrl(image).url
+
+                subscreensList.add([name:subscreensItem.name, title:ec.resource.expand(subscreensItem.menuTitle, ""),
+                                    path:screenPath, urlWithParams:urlWithParams, image:image, imageType:imageType,
+                                    active:(nextItem == subscreensItem.name), disableLink:screenUrlInstance.disableLink])
+            }
+
+            menuDataList.add([name:pathItem, title:curScreen.getDefaultMenuName(), subscreens:subscreensList,
+                              path:currentPath.toString(), hasTabMenu:curScreen.hasTabMenu()])
+        }
+
+        String lastPathItem = (String) extraPath.get(extraPathSize - 1)
+        UrlInstance fullUrlInstance = fullUrlInfo.getInstance(this, null)
+        fullUrlInstance.addParameters(ec.web.getRequestParameters())
+        currentPath.append('/').append(lastPathItem)
+        String lastPath = currentPath.toString()
+        String paramString = fullUrlInstance.getParameterString()
+        if (paramString.length() > 0) currentPath.append('?').append(paramString)
+        String lastImage = fullUrlInfo.menuImage
+        String lastImageType = fullUrlInfo.menuImageType
+        if (lastImage != null && lastImage.length() > 0 && (lastImageType == null || lastImageType.length() == 0 || "url-screen".equals(lastImageType)))
+            lastImage = buildUrl(lastImage).url
+        menuDataList.add([name:lastPathItem, title:fullUrlInfo.targetScreen.getDefaultMenuName(), path:lastPath,
+                          urlWithParams:currentPath.toString(), image:lastImage, imageType:lastImageType])
+
+        return menuDataList
     }
 }
