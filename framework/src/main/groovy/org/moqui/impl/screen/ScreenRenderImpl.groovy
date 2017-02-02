@@ -112,33 +112,17 @@ class ScreenRenderImpl implements ScreenRender {
     ScreenUrlInfo getScreenUrlInfo() { return screenUrlInfo }
     UrlInstance getScreenUrlInstance() { return screenUrlInstance }
 
-    @Override
-    ScreenRender rootScreen(String rsLocation) { rootScreenLocation = rsLocation; return this }
-
+    @Override ScreenRender rootScreen(String rsLocation) { rootScreenLocation = rsLocation; return this }
     ScreenRender rootScreenFromHost(String host) { return rootScreen(sfi.rootScreenFromHost(host, webappName)) }
-
-    @Override
-    ScreenRender screenPath(List<String> screenNameList) { originalScreenPathNameList.addAll(screenNameList); return this }
-
-    @Override
-    ScreenRender renderMode(String renderMode) { this.renderMode = renderMode; return this }
-
+    @Override ScreenRender screenPath(List<String> screenNameList) { originalScreenPathNameList.addAll(screenNameList); return this }
+    @Override ScreenRender renderMode(String renderMode) { this.renderMode = renderMode; return this }
     String getRenderMode() { return renderMode }
 
-    @Override
-    ScreenRender encoding(String characterEncoding) { this.characterEncoding = characterEncoding;  return this }
-
-    @Override
-    ScreenRender macroTemplate(String mtl) { this.macroTemplateLocation = mtl; return this }
-
-    @Override
-    ScreenRender baseLinkUrl(String blu) { this.baseLinkUrl = blu; return this }
-
-    @Override
-    ScreenRender servletContextPath(String scp) { this.servletContextPath = scp; return this }
-
-    @Override
-    ScreenRender webappName(String wan) { this.webappName = wan; return this }
+    @Override ScreenRender encoding(String characterEncoding) { this.characterEncoding = characterEncoding;  return this }
+    @Override ScreenRender macroTemplate(String mtl) { this.macroTemplateLocation = mtl; return this }
+    @Override ScreenRender baseLinkUrl(String blu) { this.baseLinkUrl = blu; return this }
+    @Override ScreenRender servletContextPath(String scp) { this.servletContextPath = scp; return this }
+    @Override ScreenRender webappName(String wan) { this.webappName = wan; return this }
 
     @Override
     void render(HttpServletRequest request, HttpServletResponse response) {
@@ -185,7 +169,7 @@ class ScreenRenderImpl implements ScreenRender {
         }
     }
     boolean sendJsonRedirect(UrlInstance fullUrl) {
-        if ("json".equals(screenUrlInfo.targetTransitionExtension) || "application/json".equals(request?.getHeader("Accept"))) {
+        if ("json".equals(screenUrlInfo.targetTransitionExtension) || request?.getHeader("Accept")?.contains("application/json")) {
             Map<String, Object> responseMap = new HashMap<>()
             // add saveMessagesToSession, saveRequestParametersToSession/saveErrorParametersToSession data
             // add all plain object data from session?
@@ -351,9 +335,9 @@ class ScreenRenderImpl implements ScreenRender {
                     String curToken = ec.web.getSessionToken()
                     if (curToken != null && curToken.length() > 0) {
                         if (passedToken == null || passedToken.length() == 0) {
-                            throw new IllegalArgumentException("Session token required (in moquiSessionToken) for URL ${screenUrlInstance.url}")
+                            throw new AuthenticationRequiredException("Session token required (in moquiSessionToken) for URL ${screenUrlInstance.url}")
                         } else if (!curToken.equals(passedToken)) {
-                            throw new IllegalArgumentException("Session token does not match (in moquiSessionToken) for URL ${screenUrlInstance.url}")
+                            throw new AuthenticationRequiredException("Session token does not match (in moquiSessionToken) for URL ${screenUrlInstance.url}")
                         }
                     }
                 }
@@ -691,58 +675,63 @@ class ScreenRenderImpl implements ScreenRender {
                 }
             }
 
-            ArrayList<ScreenDefinition> preActionSds
-            if (screenUrlInfo.targetScreenRenderMode != null && sfi.isRenderModeAlwaysStandalone(screenUrlInfo.targetScreenRenderMode) &&
-                    screenUrlInfo.screenPathDefList.size() > 2) {
-                // special case for render modes that are always standalone: run pre-actions for all screens in path except first 2 (generally webroot, apps)
-                preActionSds = new ArrayList<>(screenUrlInfo.screenPathDefList.subList(2, screenUrlInfo.screenPathDefList.size()))
-            } else {
-                // run pre-actions for just the screens that will be rendered
-                preActionSds = screenUrlInfo.screenRenderDefList
-            }
-            boolean hasPreActions = false
-            int preActionSdSize = preActionSds.size()
-            for (int i = 0; i < preActionSdSize; i++) {
-                ScreenDefinition sd = (ScreenDefinition) preActionSds.get(i)
-                if (sd.preActions != null) { hasPreActions = true; break }
-            }
-            if (hasPreActions) recursiveRunActions(preActionSds.iterator(), false, true)
+            try {
+                ArrayList<ScreenDefinition> preActionSds
+                if (screenUrlInfo.targetScreenRenderMode != null && sfi.isRenderModeAlwaysStandalone(screenUrlInfo.targetScreenRenderMode) &&
+                        screenUrlInfo.screenPathDefList.size() > 2) {
+                    // special case for render modes that are always standalone: run pre-actions for all screens in path except first 2 (generally webroot, apps)
+                    preActionSds = new ArrayList<>(screenUrlInfo.screenPathDefList.subList(2, screenUrlInfo.screenPathDefList.size()))
+                } else {
+                    // run pre-actions for just the screens that will be rendered
+                    preActionSds = screenUrlInfo.screenRenderDefList
+                }
+                boolean hasPreActions = false
+                int preActionSdSize = preActionSds.size()
+                for (int i = 0; i < preActionSdSize; i++) {
+                    ScreenDefinition sd = (ScreenDefinition) preActionSds.get(i)
+                    if (sd.preActions != null) { hasPreActions = true; break }
+                }
+                if (hasPreActions) recursiveRunActions(preActionSds.iterator(), false, true)
 
-            // if dontDoRender then quit now; this should be set during always-actions or pre-actions
-            if (dontDoRender) {
-                // pop all screens, then good to go
-                if (aeiList) for (int i = (aeiList.size() - 1); i >= 0; i--) ec.artifactExecution.pop(aeiList.get(i))
-                return
-            }
+                // if dontDoRender then quit now; this should be set during always-actions or pre-actions
+                if (dontDoRender) { return }
 
-            // we've run always and pre actions, it's now or never for required parameters so check them
+                // we've run always and pre actions, it's now or never for required parameters so check them
 
-            if (!sfi.isRenderModeSkipActions(renderMode)) for (ScreenDefinition sd in screenUrlInfo.screenRenderDefList) {
-                for (ScreenDefinition.ParameterItem pi in sd.getParameterMap().values()) {
-                    if (!pi.required) continue
-                    Object parmValue = ec.context.getByString(pi.name)
-                    if (ObjectUtilities.isEmpty(parmValue)) {
-                        ec.message.addError(ec.resource.expand("Required parameter missing (${pi.name})","",[pi:pi]))
-                        logger.warn("Tried to render screen [${sd.getLocation()}] without required parameter [${pi.name}], error message added and adding to stop list to not render")
-                        stopRenderScreenLocations.add(sd.getLocation())
+                if (!sfi.isRenderModeSkipActions(renderMode)) for (ScreenDefinition sd in screenUrlInfo.screenRenderDefList) {
+                    for (ScreenDefinition.ParameterItem pi in sd.getParameterMap().values()) {
+                        if (!pi.required) continue
+                        Object parmValue = ec.context.getByString(pi.name)
+                        if (ObjectUtilities.isEmpty(parmValue)) {
+                            ec.message.addError(ec.resource.expand("Required parameter missing (${pi.name})","",[pi:pi]))
+                            logger.warn("Tried to render screen [${sd.getLocation()}] without required parameter [${pi.name}], error message added and adding to stop list to not render")
+                            stopRenderScreenLocations.add(sd.getLocation())
+                        }
                     }
                 }
+
+                // start rendering at the root section of the root screen
+                ScreenDefinition renderStartDef = screenUrlInfo.screenRenderDefList.get(0)
+                // if screenRenderDefList.size == 1 then it is the target screen, otherwise it's not
+                renderStartDef.render(this, screenUrlInfo.screenRenderDefList.size() == 1)
+
+                // if these aren't already cleared it out means they haven't been included in the output, so add them here
+                if (afterScreenWriter != null) internalWriter.write(afterScreenWriter.toString())
+                if (scriptWriter != null) {
+                    internalWriter.write("\n<script>\n")
+                    internalWriter.write(scriptWriter.toString())
+                    internalWriter.write("\n</script>\n")
+                }
+            } finally {
+                // pop all screens, then good to go
+                if (aeiList) for (int i = (aeiList.size() - 1); i >= 0; i--) ec.artifactExecution.pop(aeiList.get(i))
             }
 
-            // start rendering at the root section of the root screen
-            ScreenDefinition renderStartDef = screenUrlInfo.screenRenderDefList.get(0)
-            // if screenRenderDefList.size == 1 then it is the target screen, otherwise it's not
-            renderStartDef.render(this, screenUrlInfo.screenRenderDefList.size() == 1)
-
-            // if these aren't already cleared it out means they haven't been included in the output, so add them here
-            if (afterScreenWriter != null) internalWriter.write(afterScreenWriter.toString())
-            if (scriptWriter != null) {
-                internalWriter.write("\n<script>\n")
-                internalWriter.write(scriptWriter.toString())
-                internalWriter.write("\n</script>\n")
+            // save the screen history
+            if (screenUrlInfo.targetExists) {
+                WebFacade webFacade = ec.getWeb()
+                if (webFacade != null && webFacade instanceof WebFacadeImpl) ((WebFacadeImpl) webFacade).saveScreenHistory(screenUrlInstance)
             }
-
-            if (aeiList) for (int i = (aeiList.size() - 1); i >= 0; i--) ec.artifactExecution.pop(aeiList.get(i))
         } catch (ArtifactAuthorizationException e) {
             throw e
         } catch (ArtifactTarpitException e) {
@@ -752,13 +741,8 @@ class ScreenRenderImpl implements ScreenRender {
             sfi.ecfi.transactionFacade.rollback(beganTransaction, errMsg, t)
             throw new RuntimeException(errMsg, t)
         } finally {
-            WebFacade webFacade = ec.getWeb()
             // if we began a tx commit it
             if (beganTransaction && sfi.ecfi.transactionFacade.isTransactionInPlace()) sfi.ecfi.transactionFacade.commit()
-            // save the screen history
-            if (webFacade != null && webFacade instanceof WebFacadeImpl) {
-                ((WebFacadeImpl) webFacade).saveScreenHistory(screenUrlInstance)
-            }
         }
     }
 
@@ -839,7 +823,7 @@ class ScreenRenderImpl implements ScreenRender {
                 */
 
                 /* better to always send a JSON response as above instead of sometimes sending the Login screen, other that status response usually ignored anyway
-                if ("json".equals(screenUrlInfo.targetTransitionExtension) || "application/json".equals(request?.getHeader("Accept"))) {
+                if ("json".equals(screenUrlInfo.targetTransitionExtension) || request?.getHeader("Accept")?.contains("application/json")) {
                 } else {
                     // respond with 401 and the login screen instead of a redirect; JS client libraries handle this much better
                     this.originalScreenPathNameList = pathElements

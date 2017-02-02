@@ -178,6 +178,8 @@ class WebFacadeImpl implements WebFacade {
     /** Apache Commons FileUpload does not support string array so when using multiple select and there's a duplicate
      * fieldName convert value to an array list when fieldName is already in multipart parameters. */
     private void addValueToMultipartParameterMap(String key, Object value) {
+        // change &nbsp; (\u00a0) to null, used as a placeholder when empty string doesn't work
+        if ("\u00a0".equals(value)) value = null
         Object previousValue = multiPartParameters.put(key, value)
         if (previousValue != null) {
             List<Object> valueList = new ArrayList<>()
@@ -568,6 +570,7 @@ class WebFacadeImpl implements WebFacade {
         String jsonStr
         if (responseObj instanceof CharSequence) {
             jsonStr = responseObj.toString()
+            responseObj = null
         } else {
             if (eci.message.messages) {
                 if (responseObj == null) {
@@ -581,40 +584,29 @@ class WebFacadeImpl implements WebFacade {
             }
 
             if (eci.getMessage().hasError()) {
-                JsonBuilder jb = new JsonBuilder()
                 // if the responseObj is a Map add all of it's data
-                if (responseObj instanceof Map) {
-                    // only add an errors if it is not a jsonrpc response (JSON RPC has it's own error handling)
-                    if (!responseObj.containsKey("jsonrpc")) {
-                        Map responseMap = new HashMap()
-                        responseMap.putAll(responseObj)
-                        responseMap.put("errors", eci.message.errorsString)
-                        responseObj = responseMap
-                    }
-                    jb.call(responseObj)
-                } else if (responseObj != null) {
-                    logger.error("Error found when sending JSON string but JSON object is not a Map so not sending: ${eci.message.errorsString}")
-                    jb.call(responseObj)
+                // only add an errors if it is not a jsonrpc response (JSON RPC has it's own error handling)
+                if (responseObj instanceof Map && !responseObj.containsKey("errors") && !responseObj.containsKey("jsonrpc")) {
+                    Map responseMap = new HashMap()
+                    responseMap.putAll(responseObj)
+                    responseMap.put("errors", eci.message.errorsString)
+                    responseObj = responseMap
+                } else if (responseObj != null && !(responseObj instanceof Map)) {
+                    logger.error("Error found when sending JSON string but JSON object is not a Map so not sending errors: ${eci.message.errorsString}")
                 }
-
-                jsonStr = jb.toString()
                 response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
-            } else if (responseObj != null) {
-                // logger.warn("========== Sending JSON for object: ${responseObj}")
-                JsonBuilder jb = new JsonBuilder()
-                if (responseObj instanceof Map) {
-                    jb.call((Map) responseObj)
-                } else if (responseObj instanceof List) {
-                    jb.call((List) responseObj)
-                } else {
-                    jb.call((Object) responseObj)
-                }
-                jsonStr = jb.toPrettyString()
-                response.setStatus(HttpServletResponse.SC_OK)
             } else {
-                jsonStr = ""
                 response.setStatus(HttpServletResponse.SC_OK)
             }
+        }
+
+        // logger.warn("========== Sending JSON for object: ${responseObj}")
+        if (responseObj != null) {
+            JsonBuilder jb = new JsonBuilder()
+            if (responseObj instanceof Map) { jb.call((Map) responseObj) }
+            else if (responseObj instanceof List) { jb.call((List) responseObj) }
+            else { jb.call((Object) responseObj) }
+            jsonStr = jb.toPrettyString()
         }
 
         if (!jsonStr) return
@@ -712,14 +704,18 @@ class WebFacadeImpl implements WebFacade {
     }
     static void sendResourceResponseInternal(String location, boolean inline, ExecutionContextImpl eci, HttpServletResponse response) {
         ResourceReference rr = eci.resource.getLocationReference(location)
-        if (rr == null) throw new IllegalArgumentException("Resource not found at: ${location}")
-        response.setContentType(rr.contentType)
+        if (rr == null) {
+            logger.warn("Sending not found response, resource not found at: ${location}")
+            response.sendError(HttpServletResponse.SC_NOT_FOUND)
+            return
+        }
+        String contentType = rr.getContentType()
+        if (contentType) response.setContentType(contentType)
         if (inline) {
             response.addHeader("Content-Disposition", "inline")
         } else {
             response.addHeader("Content-Disposition", "attachment; filename=\"${rr.getFileName()}\"; filename*=utf-8''${StringUtilities.encodeAsciiFilename(rr.getFileName())}")
         }
-        String contentType = rr.getContentType()
         if (!contentType || ResourceReference.isBinaryContentType(contentType)) {
             InputStream is = rr.openStream()
             try {
