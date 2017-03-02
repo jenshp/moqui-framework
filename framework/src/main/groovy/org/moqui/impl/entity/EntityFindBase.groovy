@@ -14,8 +14,11 @@
 package org.moqui.impl.entity
 
 import groovy.transform.CompileStatic
+import org.moqui.BaseException
 import org.moqui.context.ArtifactExecutionInfo
 import org.moqui.entity.*
+import org.moqui.etl.SimpleEtl
+import org.moqui.etl.SimpleEtl.StopException
 import org.moqui.impl.context.ArtifactExecutionFacadeImpl
 import org.moqui.impl.context.ArtifactExecutionInfoImpl
 import org.moqui.impl.context.ExecutionContextImpl
@@ -607,6 +610,7 @@ abstract class EntityFindBase implements EntityFind {
         if (dynamicView != null) return false
         if (havingEntityCondition != null) return false
         if (limit != null || offset != null) return false
+        if (forUpdate) return false
         if (useCache != null) {
             boolean useCacheLocal = useCache.booleanValue()
             if (!useCacheLocal) return false
@@ -767,7 +771,7 @@ abstract class EntityFindBase implements EntityFind {
             } else {
                 // if forUpdate unless this was a TX CREATE it'll be in the DB and should be locked, so do the query
                 //     anyway, but ignore the result unless it's a read only tx cache
-                if (forUpdate && !txCache.isTxCreate(txcValue)) {
+                if (forUpdate && !txCache.isKnownLocked(txcValue) && !txCache.isTxCreate(txcValue)) {
                     EntityValueBase fuDbValue = oneExtended(isViewEntity ? getConditionForQuery(ed, whereCondition) : whereCondition, fieldInfoArray, fieldOptionsArray)
                     if (txCache.isReadOnly()) {
                         // is read only tx cache so use the value from the DB
@@ -789,7 +793,7 @@ abstract class EntityFindBase implements EntityFind {
                                 if (compareObj != baseObj) fieldDiffBuilder.append("- ").append(entry.key).append(": ")
                                         .append(compareObj).append(" (txc) != ").append(baseObj).append(" (db)\n")
                             }
-                            logger.warn("Did for update query and result did not match value in transaction cache: \n${fieldDiffBuilder}")
+                            logger.warn("Did for update query on ${ed.getFullEntityName()} and result did not match value in transaction cache: \n${fieldDiffBuilder}", new BaseException("location"))
                         }
                         newEntityValue = txcValue
                     }
@@ -810,7 +814,7 @@ abstract class EntityFindBase implements EntityFind {
             newEntityValue = oneExtended(isViewEntity ? getConditionForQuery(ed, whereCondition) : whereCondition, fieldInfoArray, fieldOptionsArray)
 
             // it didn't come from the txCache so put it there
-            if (txCache != null) txCache.onePut(newEntityValue)
+            if (txCache != null) txCache.onePut(newEntityValue, forUpdate)
 
             // put it in whether null or not (already know cacheHit is null)
             if (doCache) efi.getEntityCache().putInOneCache(ed, whereCondition, newEntityValue, entityOneCache)
@@ -994,9 +998,6 @@ abstract class EntityFindBase implements EntityFind {
             // call the abstract method
             EntityListIterator eli = iteratorExtended(queryWhereCondition, havingCondition, orderByExpanded,
                     fieldInfoArray, fieldOptionsArray)
-            // these are used by the TransactionCache methods to augment the resulting list and maintain the sort order
-            eli.setQueryCondition(queryWhereCondition)
-            eli.setOrderByFields(orderByExpanded)
 
             MNode databaseNode = this.efi.getDatabaseNode(ed.getEntityGroupName())
             if (limit != null && databaseNode != null && "cursor".equals(databaseNode.attribute("offset-style"))) {
@@ -1143,8 +1144,6 @@ abstract class EntityFindBase implements EntityFind {
 
         // call the abstract method
         EntityListIterator eli = iteratorExtended(whereCondition, havingCondition, orderByExpanded, fieldInfoArray, fieldOptionsArray)
-        eli.setQueryCondition(whereCondition)
-        eli.setOrderByFields(orderByExpanded)
 
         // NOTE: if we are doing offset/limit with a cursor no good way to limit results, but we'll at least jump to the offset
         MNode databaseNode = this.efi.getDatabaseNode(ed.getEntityGroupName())
@@ -1342,5 +1341,20 @@ abstract class EntityFindBase implements EntityFind {
             if (eli != null) eli.close()
         }
         return totalDeleted
+    }
+
+    @Override
+    void extract(SimpleEtl etl) {
+        EntityListIterator eli = iterator()
+        try {
+            EntityValue ev
+            while ((ev = eli.next()) != null) {
+                etl.processEntry(ev)
+            }
+        } catch (StopException e) {
+            logger.warn("EntityFind extract stopped on: " + (e.getCause()?.toString() ?: e.toString()))
+        } finally {
+            eli.close()
+        }
     }
 }

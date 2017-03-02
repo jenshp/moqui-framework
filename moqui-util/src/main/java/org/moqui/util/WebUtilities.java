@@ -17,6 +17,7 @@ import org.eclipse.jetty.client.HttpClient;
 import org.eclipse.jetty.client.api.ContentResponse;
 import org.eclipse.jetty.client.api.Request;
 import org.eclipse.jetty.client.util.StringContentProvider;
+import org.eclipse.jetty.util.ssl.SslContextFactory;
 import org.moqui.BaseException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -107,8 +108,11 @@ public class WebUtilities {
                 } else if (valLength == 1) {
                     String singleVal = valArray[0];
                     // change &nbsp; (\u00a0) to null, used as a placeholder when empty string doesn't work
-                    if ("\u00a0".equals(singleVal)) reqParmMap.put(entry.getKey(), null);
-                    else reqParmMap.put(entry.getKey(), singleVal);
+                    if ("\u00a0".equals(singleVal)) {
+                        reqParmMap.put(entry.getKey(), null);
+                    } else {
+                        reqParmMap.put(entry.getKey(), singleVal);
+                    }
                 } else {
                     reqParmMap.put(entry.getKey(), Arrays.asList(valArray));
                 }
@@ -121,7 +125,9 @@ public class WebUtilities {
         if (contentType == null || contentType.isEmpty()) contentType = "text/plain";
         String resultString = "";
 
-        HttpClient httpClient = new HttpClient();
+        SslContextFactory sslContextFactory = new SslContextFactory();
+        HttpClient httpClient = new HttpClient(sslContextFactory);
+
         try {
             httpClient.start();
             Request request = httpClient.POST(location);
@@ -145,7 +151,9 @@ public class WebUtilities {
     public static String simpleHttpMapRequest(String location, Map requestMap) {
         String resultString = "";
 
-        HttpClient httpClient = new HttpClient();
+        SslContextFactory sslContextFactory = new SslContextFactory();
+        HttpClient httpClient = new HttpClient(sslContextFactory);
+
         try {
             httpClient.start();
             Request request = httpClient.POST(location);

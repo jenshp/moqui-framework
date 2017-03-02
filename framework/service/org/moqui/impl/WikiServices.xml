@@ -183,8 +183,8 @@ along with this software (see the LICENSE.md file). If not, see
 
             <set field="pageName" from="pageReference?.fileName"/>
             <if condition="pageName?.contains('.')">
-                <set field="wikiType" from="pageName.substring(pageName.indexOf('.')+1)"/>
-                <set field="pageName" from="pageName.substring(0, pageName.indexOf('.'))"/>
+                <set field="wikiType" from="pageName.substring(pageName.lastIndexOf('.')+1)"/>
+                <set field="pageName" from="pageName.substring(0, pageName.lastIndexOf('.'))"/>
             </if>
 
             <set field="pathForParentPath" from="pageReference.getActualChildPath() ?: pagePath"/>
@@ -254,7 +254,9 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="pagePath"><description>Defaults to parentPath/pageName (both may be empty, resulting in empty pagePath)</description></parameter>
             <parameter name="parentPath"/>
             <parameter name="pageName" required="true">
-                <description>This is required for better usability. If pageName == wikiSpaceId is treated as the root page.</description></parameter>
+                <description>This is required for better usability. If pageName == wikiSpaceId is treated as the root page.</description>
+                <matches regexp="[\w\.\-, ]*" message="Invalid page name (letters, digits, [.,-_ ] only)"/>
+            </parameter>
             <parameter name="wikiType" default-value="md"/>
             <parameter name="pageText" allow-html="any"><description>If WikiSpace.allowAnyHtml = Y will be stored as-is, otherwise filtered like parameter.allow-html=safe.</description></parameter>
         </in-parameters>
@@ -421,6 +423,16 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <!-- org.moqui.impl.WikiServices.index#WikiSpacePages moved to org.moqui.search.SearchServices.index#WikiSpacePages -->
+    <service verb="get" noun="WikiPageManualDocumentData" authenticate="anonymous-view">
+        <implements service="org.moqui.EntityServices.add#ManualDocumentData"/>
+        <actions>
+            <!-- primaryEntityValue is a WikiPage entity value, fields will be in the root document Map -->
+            <service-call name="org.moqui.impl.WikiServices.get#WikiPageInfo" out-map="wikiPageInfo"
+                    in-map="[wikiSpaceId:document.wikiSpaceId, pagePath:document.pagePath]"/>
+            <!-- TODO: add attachments too (for indexing)? -->
+            <set field="document.content" from="ec.resource.getLocationText(wikiPageInfo.pageLocation, false)"/>
+        </actions>
+    </service>
 
     <service verb="get" noun="UserWikiSpaces">
         <in-parameters><parameter name="userId"/></in-parameters>

@@ -28,7 +28,6 @@ import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.ArtifactExecutionInfoImpl
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
-import org.moqui.impl.context.WebFacadeImpl
 import org.moqui.util.ContextStack
 import org.moqui.util.MNode
 import org.moqui.util.StringUtilities
@@ -62,6 +61,7 @@ class ScreenDefinition {
     protected Map<String, TransitionItem> transitionByName = new HashMap<>()
     protected Map<String, SubscreensItem> subscreensByName = new HashMap<>()
     protected ArrayList<SubscreensItem> subscreensItemsSorted = null
+    protected String defaultSubscreensItem = null
 
     protected XmlAction alwaysActions = null
     protected XmlAction preActions = null
@@ -125,6 +125,7 @@ class ScreenDefinition {
         if (!transitionByName.containsKey("formSaveFind")) transitionByName.put("formSaveFind", new FormSavedFindsTransitionItem(this))
 
         // subscreens
+        defaultSubscreensItem = subscreensNode?.attribute("default-item")
         populateSubscreens()
 
         // macro-template - go through entire list and set all found, basically we want the last one if there are more than one
@@ -276,13 +277,14 @@ class ScreenDefinition {
         for (EntityValue subscreensItem in subscreensItemList) {
             SubscreensItem si = new SubscreensItem(subscreensItem, this)
             subscreensByName.put(si.name, si)
+            if ("Y".equals(subscreensItem.makeDefault)) defaultSubscreensItem = si.name
             if (logger.traceEnabled) logger.trace("Added database subscreen [${si.name}] at [${si.location}] to screen [${locationRef}]")
         }
     }
 
     MNode getScreenNode() { return screenNode }
     MNode getSubscreensNode() { return subscreensNode }
-    String getDefaultSubscreensItem() { return subscreensNode?.attribute('default-item') }
+    String getDefaultSubscreensItem() { return defaultSubscreensItem }
     MNode getWebSettingsNode() { return webSettingsNode }
     String getLocation() { return location }
 
@@ -655,14 +657,15 @@ class ScreenDefinition {
 
         boolean checkCondition(ExecutionContextImpl ec) { return condition ? condition.checkCondition(ec) : true }
 
-        void setAllParameters(List<String> extraPathNameList, ExecutionContext ec) {
+        void setAllParameters(List<String> extraPathNameList, ExecutionContextImpl ec) {
             // get the path parameters
             if (extraPathNameList && getPathParameterList()) {
                 List<String> pathParameterList = getPathParameterList()
                 int i = 0
                 for (String extraPathName in extraPathNameList) {
                     if (pathParameterList.size() > i) {
-                        if (ec.getWeb()) ((WebFacadeImpl) ec.getWeb()).addDeclaredPathParameter(pathParameterList.get(i), extraPathName)
+                        // logger.warn("extraPathName ${extraPathName} i ${i} name ${pathParameterList.get(i)}")
+                        if (ec.webImpl != null) ec.webImpl.addDeclaredPathParameter(pathParameterList.get(i), extraPathName)
                         ec.getContext().put(pathParameterList.get(i), extraPathName)
                         i++
                     } else {
@@ -672,16 +675,16 @@ class ScreenDefinition {
             }
 
             // put parameters in the context
-            if (ec.getWeb()) {
+            if (ec.getWeb() != null) {
                 // screen parameters
                 for (ParameterItem pi in parentScreen.getParameterMap().values()) {
                     Object value = pi.getValue(ec)
-                    if (value != null) ec.getContext().put(pi.getName(), value)
+                    if (value != null) ec.contextStack.put(pi.getName(), value)
                 }
                 // transition parameters
                 for (ParameterItem pi in parameterByName.values()) {
                     Object value = pi.getValue(ec)
-                    if (value != null) ec.getContext().put(pi.getName(), value)
+                    if (value != null) ec.contextStack.put(pi.getName(), value)
                 }
             }
         }
@@ -874,7 +877,7 @@ class ScreenDefinition {
         protected TransitionItem transitionItem
         protected ScreenDefinition parentScreen
         protected XmlAction condition = null
-        protected Map<String, ParameterItem> parameterMap = new HashMap()
+        protected Map<String, ParameterItem> parameterMap = new HashMap<>()
 
         protected String type
         protected String url
@@ -915,7 +918,7 @@ class ScreenDefinition {
         boolean getSaveCurrentScreen() { return saveCurrentScreen }
         boolean getSaveParameters() { return saveParameters }
 
-        Map expandParameters(List<String> extraPathNameList, ExecutionContext ec) {
+        Map expandParameters(List<String> extraPathNameList, ExecutionContextImpl ec) {
             transitionItem.setAllParameters(extraPathNameList, ec)
 
             Map ep = new HashMap()
