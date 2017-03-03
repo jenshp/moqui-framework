@@ -93,16 +93,7 @@ along with this software (see the LICENSE.md file). If not, see
                 </xs:simpleType>
             </xs:attribute>
 
-            <xs:attribute name="require-authentication" default="true">
-                <xs:simpleType>
-                    <xs:restriction base="xs:token">
-                        <xs:enumeration value="true"/>
-                        <xs:enumeration value="false"/>
-                        <xs:enumeration value="anonymous-all"/>
-                        <xs:enumeration value="anonymous-view"/>
-                    </xs:restriction>
-                </xs:simpleType>
-            </xs:attribute>
+            <xs:attribute name="require-authentication" type="authc-options" default="true"/>
             <!-- TABLED, not to be part of 1.0: <xs:attribute name="require-certificate" default="false" type="boolean"/> -->
             <xs:attribute name="begin-transaction" type="boolean" default="false">
                 <xs:annotation><xs:documentation>
@@ -129,10 +120,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:annotation><xs:documentation>If set to true arbitrary path follow this screen's path is allowed.
                     Default is false and an exception will be thrown if there is extra path that does not match a
                     subscreen, a transition, or content below the screen.</xs:documentation></xs:annotation>
-            </xs:attribute>
-            <xs:attribute name="tenants-allowed" type="xs:string">
-                <xs:annotation><xs:documentation>Comma-separated set of Tenant IDs allowed to use this screen. If empty
-                    (default) all tenants can use the screen.</xs:documentation></xs:annotation>
             </xs:attribute>
         </xs:complexType>
     </xs:element>
@@ -511,10 +498,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:annotation><xs:documentation>This condition is run the subscreens menu is rendered to see if the
                     item is available (otherwise the button/link/etc is disabled).</xs:documentation></xs:annotation>
             </xs:attribute>
-            <xs:attribute name="tenants-allowed" type="xs:string">
-                <xs:annotation><xs:documentation>Comma-separated set of Tenant IDs allowed to use this screen. If empty
-                    (default) all tenants can use the screen.</xs:documentation></xs:annotation>
-            </xs:attribute>
         </xs:complexType>
     </xs:element>
     <xs:element name="subscreens-menu" substitutionGroup="AllWidgets">
@@ -523,7 +506,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:simpleType><xs:restriction base="xs:token">
                     <xs:enumeration value="tab"/>
                     <xs:enumeration value="popup"/>
-                    <xs:enumeration value="popup-tree"/>
                 </xs:restriction></xs:simpleType>
             </xs:attribute>
             <xs:attribute name="id" type="xs:string" use="required"/>
@@ -779,7 +761,7 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:group ref="widget-elements" minOccurs="0" maxOccurs="unbounded"/>
             <xs:attribute name="id" type="xs:string" use="required"/>
             <xs:attribute name="button-text" type="xs:string" use="required"/>
-            <xs:attribute name="width" type="xs:string" default="600"/>
+            <xs:attribute name="width" type="xs:string" default="760"/>
             <xs:attribute name="height" type="xs:string" default="600"/>
         </xs:complexType>
     </xs:element>
@@ -790,7 +772,7 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:sequence><xs:element minOccurs="0" maxOccurs="unbounded" ref="parameter"/></xs:sequence>
             <xs:attribute name="id" type="xs:string" use="required"/>
             <xs:attribute name="button-text" type="xs:string" use="required"/>
-            <xs:attribute name="width" type="xs:string" default="600"/>
+            <xs:attribute name="width" type="xs:string" default="760"/>
             <xs:attribute name="height" type="xs:string" default="600"/>
             <xs:attribute name="transition" type="xs:string" use="required"/>
             <xs:attribute name="parameter-map" type="xs:string"><xs:annotation><xs:documentation>A Map to get parameter

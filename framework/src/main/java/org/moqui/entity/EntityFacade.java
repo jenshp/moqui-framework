@@ -15,9 +15,12 @@ package org.moqui.entity;
 
 import java.sql.Connection;
 import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Map;
+
+import org.moqui.util.MNode;
 import org.w3c.dom.Element;
 
 /** The main interface for general database operations in Moqui. */
@@ -48,8 +51,7 @@ public interface EntityFacade {
      * @return An EntityFind object.
      */
     EntityFind find(String entityName);
-    /** Same as the find() method, exists to support code using this older method name. */
-    EntityFind makeFind(String entityName);
+    EntityFind find(MNode entityFindNode);
 
     /** Meant for processing entity REST requests, but useful more generally as a simple way to perform entity operations.
      *
@@ -87,7 +89,7 @@ public interface EntityFacade {
      * @param fromUpdateStamp The lastUpdatedStamp on at least one entity selected must be after (&gt;=) this Timestamp.
      * @param thruUpdatedStamp The lastUpdatedStamp on at least one entity selected must be before (&lt;) this Timestamp.
      * @return List of Maps with these entries:
-     *      - _index = tenantId + "__" + DataDocument.indexName
+     *      - _index = DataDocument.indexName
      *      - _type = dataDocumentId
      *      - _id = pk field values from primary entity, underscore separated
      *      - _timestamp = timestamp when the document was created
@@ -95,8 +97,8 @@ public interface EntityFacade {
      *      - nested List of Maps for each related entity from DataDocumentField records with aliased fields
      *          (with relationship name as key)
      */
-    List<Map> getDataDocuments(String dataDocumentId, EntityCondition condition, Timestamp fromUpdateStamp,
-                                Timestamp thruUpdatedStamp);
+    ArrayList<Map> getDataDocuments(String dataDocumentId, EntityCondition condition, Timestamp fromUpdateStamp,
+                                    Timestamp thruUpdatedStamp);
 
     /** Find and assemble data documents represented by a Map that can be easily turned into a JSON document. This is
      * similar to the getDataDocuments() method except that the dataDocumentId(s) are looked up using the dataFeedId.
@@ -106,7 +108,7 @@ public interface EntityFacade {
      * @param thruUpdatedStamp The lastUpdatedStamp on at least one entity selected must be before (&lt;) this Timestamp.
      * @return List of Maps with these entries:
      */
-    List<Map> getDataFeedDocuments(String dataFeedId, Timestamp fromUpdateStamp, Timestamp thruUpdatedStamp);
+    ArrayList<Map> getDataFeedDocuments(String dataFeedId, Timestamp fromUpdateStamp, Timestamp thruUpdatedStamp);
 
     /** Get the next guaranteed unique seq id from the sequence with the given sequence name;
      * if the named sequence doesn't exist, it will be created.
@@ -129,7 +131,7 @@ public interface EntityFacade {
      * the active Transaction.
      *
      * @param groupName The name of entity group to get a connection for.
-     *     Corresponds to the entity.group-name attribute and the moqui-conf datasource.group-name attribute.
+     *     Corresponds to the entity.@group attribute and the moqui-conf datasource.@group-name attribute.
      * @return JDBC Connection object for the associated database
      * @throws EntityException
      */

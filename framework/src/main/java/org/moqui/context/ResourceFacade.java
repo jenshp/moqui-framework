@@ -13,6 +13,8 @@
  */
 package org.moqui.context;
 
+import org.moqui.resource.ResourceReference;
+
 import javax.activation.DataSource;
 import javax.xml.transform.stream.StreamSource;
 import java.io.InputStream;
@@ -77,6 +79,7 @@ public interface ResourceFacade {
     String expand(String inputString, String debugLocation);
     String expand(String inputString, String debugLocation, Map additionalContext);
     String expand(String inputString, String debugLocation, Map additionalContext, boolean localize);
+    String expandNoL10n(String inputString, String debugLocation);
 
     void xslFoTransform(StreamSource xslFoSrc, StreamSource xsltSrc, OutputStream out, String contentType);
 

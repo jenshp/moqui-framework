@@ -17,7 +17,7 @@ import groovy.text.GStringTemplateEngine
 import groovy.text.Template
 import groovy.transform.CompileStatic
 import org.moqui.context.ExecutionContextFactory
-import org.moqui.context.ResourceReference
+import org.moqui.resource.ResourceReference
 import org.moqui.context.TemplateRenderer
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.jcache.MCache
@@ -57,7 +57,7 @@ class GStringTemplateRenderer implements TemplateRenderer {
         Template theTemplate;
         if (templateGStringLocationCache instanceof MCache) {
             MCache<String, Template> mCache = (MCache) templateGStringLocationCache;
-            ResourceReference rr = ecfi.getResourceFacade().getLocationReference(location);
+            ResourceReference rr = ecfi.resourceFacade.getLocationReference(location);
             long lastModified = rr != null ? rr.getLastModified() : 0L;
             theTemplate = mCache.get(location, lastModified);
         } else {

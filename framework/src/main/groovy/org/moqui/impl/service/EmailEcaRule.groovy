@@ -69,11 +69,11 @@ class EmailEcaRule {
             fields.put("toList", toList)
 
             List<String> ccList = []
-            for (Address addr in message.getRecipients(MimeMessage.RecipientType.CC)) toList.add(addr.toString())
+            for (Address addr in message.getRecipients(MimeMessage.RecipientType.CC)) ccList.add(addr.toString())
             fields.put("ccList", ccList)
 
             List<String> bccList = []
-            for (Address addr in message.getRecipients(MimeMessage.RecipientType.BCC)) toList.add(addr.toString())
+            for (Address addr in message.getRecipients(MimeMessage.RecipientType.BCC)) bccList.add(addr.toString())
             fields.put("bccList", bccList)
 
             fields.put("from", message.getFrom() ? message.getFrom()[0] : null)
@@ -119,7 +119,7 @@ class EmailEcaRule {
         }
     }
 
-    protected List<Map> makeBodyPartList(Part part) {
+    static List<Map> makeBodyPartList(Part part) {
         List<Map> bodyPartList = []
         Object content = part.getContent()
         Map bpMap = [contentType:part.getContentType(), filename:part.getFileName(), disposition:part.getDisposition()?.toLowerCase()]

@@ -20,6 +20,7 @@ import org.moqui.entity.EntityDataLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.servlet.ServletContext;
 import java.util.*;
 
 /**
@@ -44,18 +45,55 @@ public class Moqui {
             // initialize the activeExecutionContextFactory from configuration using java.util.ServiceLoader
             // the implementation class name should be in: "META-INF/services/org.moqui.context.ExecutionContextFactory"
             activeExecutionContextFactory = executionContextFactoryLoader.iterator().next();
-            activeExecutionContextFactory.postInit();
         }
     }
 
     public static void dynamicInit(ExecutionContextFactory executionContextFactory) {
-        if (activeExecutionContextFactory == null) {
-            activeExecutionContextFactory = executionContextFactory;
-            activeExecutionContextFactory.postInit();
-        } else {
+        if (activeExecutionContextFactory != null && !activeExecutionContextFactory.isDestroyed())
             throw new IllegalStateException("Active ExecutionContextFactory already in place, cannot set one dynamically.");
+        activeExecutionContextFactory = executionContextFactory;
+    }
+    public static <K extends ExecutionContextFactory> K dynamicInit(Class<K> ecfClass, ServletContext sc)
+            throws InstantiationException, IllegalAccessException {
+        if (activeExecutionContextFactory != null && !activeExecutionContextFactory.isDestroyed())
+            throw new IllegalStateException("Active ExecutionContextFactory already in place, cannot set one dynamically.");
+
+        K newEcf = ecfClass.newInstance();
+        // check for an empty DB
+        if (newEcf.checkEmptyDb()) {
+            logger.warn("Data loaded into empty DB, re-initializing ExecutionContextFactory");
+            // destroy old ECFI
+            newEcf.destroy();
+            // create new ECFI to get framework init data from DB
+            newEcf = ecfClass.newInstance();
         }
 
+        if (sc != null) {
+            // tell ECF about the ServletContext
+            newEcf.initServletContext(sc);
+            // set SC attribute and Moqui class static reference
+            sc.setAttribute("executionContextFactory", newEcf);
+        }
+
+        activeExecutionContextFactory = newEcf;
+        return newEcf;
+    }
+    public static <K extends ExecutionContextFactory> K dynamicReInit(Class<K> ecfClass, ServletContext sc)
+            throws InstantiationException, IllegalAccessException {
+
+        // handle Servlet pause then resume taking requests after by removing executionContextFactory attribute
+        if (sc.getAttribute("executionContextFactory") != null) sc.removeAttribute("executionContextFactory");
+
+        if (activeExecutionContextFactory != null) {
+            if (!activeExecutionContextFactory.isDestroyed()) {
+                activeExecutionContextFactory.destroyActiveExecutionContext();
+                activeExecutionContextFactory.destroy();
+            }
+            activeExecutionContextFactory = null;
+            System.gc();
+        }
+
+        return dynamicInit(ecfClass, sc);
     }
 
     public static ExecutionContextFactory getExecutionContextFactory() { return activeExecutionContextFactory; }
@@ -79,14 +117,15 @@ public class Moqui {
             activeExecutionContextFactory = executionContextFactoryLoader.iterator().next();
 
         ExecutionContext ec = activeExecutionContextFactory.getExecutionContext();
+        // disable authz and add an artifact set to anonymous authorized all
         ec.getArtifactExecution().disableAuthz();
         ec.getArtifactExecution().push("loadData", ArtifactExecutionInfo.AT_OTHER, ArtifactExecutionInfo.AUTHZA_ALL, false);
         ec.getArtifactExecution().setAnonymousAuthorizedAll();
+
+        // login anonymous user
         ec.getUser().loginAnonymousIfNoUser();
 
-        String tenantId = argMap.get("tenantId");
-        if (tenantId != null && tenantId.length() > 0) ec.changeTenant(tenantId);
-
+        // set the data load parameters
         EntityDataLoader edl = ec.getEntity().makeDataLoader();
         if (argMap.containsKey("types"))
             edl.dataTypes(new HashSet<>(Arrays.asList(argMap.get("types").split(","))));
@@ -94,14 +133,15 @@ public class Moqui {
             edl.componentNameList(Arrays.asList(argMap.get("components").split(",")));
         if (argMap.containsKey("location")) edl.location(argMap.get("location"));
         if (argMap.containsKey("timeout")) edl.transactionTimeout(Integer.valueOf(argMap.get("timeout")));
-        if (argMap.containsKey("dummy-fks")) edl.dummyFks(true);
-        if (argMap.containsKey("use-try-insert")) edl.useTryInsert(true);
+        if (argMap.containsKey("raw") || argMap.containsKey("dummy-fks")) edl.dummyFks(true);
+        if (argMap.containsKey("raw") || argMap.containsKey("use-try-insert")) edl.useTryInsert(true);
+        if (argMap.containsKey("raw") || argMap.containsKey("disable-eeca")) edl.disableEntityEca(true);
+        if (argMap.containsKey("raw") || argMap.containsKey("disable-audit-log")) edl.disableAuditLog(true);
 
-        long startTime = System.currentTimeMillis();
-
+        // do the data load
         try {
+            long startTime = System.currentTimeMillis();
             long records = edl.load();
-
             long totalSeconds = (System.currentTimeMillis() - startTime)/1000;
             logger.info("Loaded [" + records + "] records in " + totalSeconds + " seconds.");
         } catch (Throwable t) {

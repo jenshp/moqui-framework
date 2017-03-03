@@ -14,14 +14,15 @@
 package org.moqui.impl.context
 
 import groovy.transform.CompileStatic
-import org.moqui.impl.StupidJavaUtilities
 import org.moqui.jcache.MCache
 import org.moqui.jcache.MCacheConfiguration
 import org.moqui.jcache.MCacheManager
-import org.moqui.jcache.MCacheToolFactory
+import org.moqui.impl.tools.MCacheToolFactory
 import org.moqui.jcache.MEntry
 import org.moqui.jcache.MStats
+import org.moqui.util.CollectionUtilities
 import org.moqui.util.MNode
+import org.moqui.util.ObjectUtilities
 
 import javax.cache.Cache
 import javax.cache.CacheManager
@@ -38,8 +39,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
 
 import org.moqui.context.CacheFacade
-import org.moqui.impl.StupidUtilities
-
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
@@ -54,8 +53,7 @@ public class CacheFacadeImpl implements CacheFacade {
     protected CacheManager localCacheManagerInternal = (CacheManager) null
     protected CacheManager distCacheManagerInternal = (CacheManager) null
 
-    protected final ConcurrentMap<String, Cache> localCacheMap = new ConcurrentHashMap<>()
-    protected final Map<String, Boolean> cacheTenantsShare = new HashMap<String, Boolean>()
+    final ConcurrentMap<String, Cache> localCacheMap = new ConcurrentHashMap<>()
 
     CacheFacadeImpl(ExecutionContextFactoryImpl ecfi) {
         this.ecfi = ecfi
@@ -74,26 +72,16 @@ public class CacheFacadeImpl implements CacheFacade {
         return distCacheManagerInternal
     }
 
-    void destroy() { }
-
-    protected String getFullName(String cacheName, String tenantId) {
-        if (cacheName == null) return null
-        if (cacheName.contains("__")) return cacheName
-        if (isTenantsShare(cacheName)) {
-            return cacheName
-        } else {
-            if (!tenantId) tenantId = ecfi.getEci().getTenantId()
-            return tenantId.concat("__").concat(cacheName)
+    void destroy() {
+        if (localCacheManagerInternal != null) {
+            for (String cacheName in localCacheManagerInternal.getCacheNames())
+                localCacheManagerInternal.destroyCache(cacheName)
         }
-    }
-    protected boolean isTenantsShare(String cacheName) {
-        Boolean savedVal = cacheTenantsShare.get(cacheName)
-        if (savedVal != null) return savedVal.booleanValue()
-
-        MNode cacheElement = getCacheNode(cacheName)
-        boolean attrVal = cacheElement?.attribute("tenants-share") == "true"
-        cacheTenantsShare.put(cacheName, attrVal)
-        return attrVal
+        localCacheMap.clear()
+        if (distCacheManagerInternal != null) {
+            for (String cacheName in distCacheManagerInternal.getCacheNames())
+                distCacheManagerInternal.destroyCache(cacheName)
+        }
     }
 
     @Override
@@ -112,31 +100,26 @@ public class CacheFacadeImpl implements CacheFacade {
     }
 
     @Override
-    Cache getCache(String cacheName) { return getCacheInternal(cacheName, null, "local") }
+    Cache getCache(String cacheName) { return getCacheInternal(cacheName, "local") }
     @Override
     <K, V> Cache<K, V> getCache(String cacheName, Class<K> keyType, Class<V> valueType) {
-        return getCacheInternal(cacheName, null, "local")
+        return getCacheInternal(cacheName, "local")
     }
 
     @Override
-    Cache getCache(String cacheName, String tenantId) {
-        return getCacheInternal(cacheName, tenantId, "local")
-    }
-    @Override
     MCache getLocalCache(String cacheName) {
-        return getCacheInternal(cacheName, null, "local").unwrap(MCache.class)
+        return getCacheInternal(cacheName, "local").unwrap(MCache.class)
     }
     @Override
     Cache getDistributedCache(String cacheName) {
-        return getCacheInternal(cacheName, null, "distributed")
+        return getCacheInternal(cacheName, "distributed")
     }
 
-    Cache getCacheInternal(String cacheName, String tenantId, String defaultCacheType) {
-        String fullName = getFullName(cacheName, tenantId)
-        Cache theCache = localCacheMap.get(fullName)
+    Cache getCacheInternal(String cacheName, String defaultCacheType) {
+        Cache theCache = localCacheMap.get(cacheName)
         if (theCache == null) {
-            localCacheMap.putIfAbsent(fullName, initCache(cacheName, tenantId, defaultCacheType))
-            theCache = localCacheMap.get(fullName)
+            localCacheMap.putIfAbsent(cacheName, initCache(cacheName, defaultCacheType))
+            theCache = localCacheMap.get(cacheName)
         }
         return theCache
     }
@@ -148,17 +131,15 @@ public class CacheFacadeImpl implements CacheFacade {
     }
 
     @Override
-    boolean cacheExists(String cacheName) { return localCacheMap.containsKey(getFullName(cacheName, null)) }
+    boolean cacheExists(String cacheName) { return localCacheMap.containsKey(cacheName) }
     @Override
     Set<String> getCacheNames() { return localCacheMap.keySet() }
 
     List<Map<String, Object>> getAllCachesInfo(String orderByField, String filterRegexp) {
-        String tenantId = ecfi.getEci().getTenantId()
-        String tenantPrefix = tenantId + "__"
+        boolean hasFilterRegexp = filterRegexp != null && filterRegexp.length() > 0
         List<Map<String, Object>> ci = new LinkedList()
         for (String cn in localCacheMap.keySet()) {
-            if (tenantId != "DEFAULT" && !cn.startsWith(tenantPrefix)) continue
-            if (filterRegexp && !cn.matches("(?i).*" + filterRegexp + ".*")) continue
+            if (hasFilterRegexp && !cn.matches("(?i).*" + filterRegexp + ".*")) continue
             Cache co = getCache(cn)
             /* TODO: somehow support external cache stats like Hazelcast, through some sort of Moqui interface or maybe the JMX bean?
                NOTE: this isn't all that important because we don't have a good use case for distributed caches
@@ -195,7 +176,7 @@ public class CacheFacadeImpl implements CacheFacade {
                 logger.warn("Cannot get detailed info for cache ${cn} which is of type ${co.class.name}")
             }
         }
-        if (orderByField) StupidUtilities.orderMapList(ci, [orderByField])
+        if (orderByField) CollectionUtilities.orderMapList(ci, [orderByField])
         return ci
     }
 
@@ -208,10 +189,8 @@ public class CacheFacadeImpl implements CacheFacade {
         return cacheElement
     }
 
-    protected synchronized Cache initCache(String cacheName, String tenantId, String defaultCacheType) {
-        if (cacheName.contains("__")) cacheName = cacheName.substring(cacheName.indexOf("__") + 2)
-        String fullCacheName = getFullName(cacheName, tenantId)
-        if (localCacheMap.containsKey(fullCacheName)) return localCacheMap.get(fullCacheName)
+    protected synchronized Cache initCache(String cacheName, String defaultCacheType) {
+        if (localCacheMap.containsKey(cacheName)) return localCacheMap.get(cacheName)
 
         if (!defaultCacheType) defaultCacheType = "local"
 
@@ -220,8 +199,8 @@ public class CacheFacadeImpl implements CacheFacade {
         if (cacheNode != null) {
             String keyTypeName = cacheNode.attribute("key-type") ?: "String"
             String valueTypeName = cacheNode.attribute("value-type") ?: "Object"
-            Class keyType = StupidJavaUtilities.getClass(keyTypeName)
-            Class valueType = StupidJavaUtilities.getClass(valueTypeName)
+            Class keyType = ObjectUtilities.getClass(keyTypeName)
+            Class valueType = ObjectUtilities.getClass(valueTypeName)
 
             Factory<ExpiryPolicy> expiryPolicyFactory
             if (cacheNode.attribute("expire-time-idle") && cacheNode.attribute("expire-time-idle") != "0") {
@@ -292,7 +271,7 @@ public class CacheFacadeImpl implements CacheFacade {
                 config = (Configuration) mutConfig
             }
 
-            newCache = cacheManager.createCache(fullCacheName, config)
+            newCache = cacheManager.createCache(cacheName, config)
         } else {
             CacheManager cacheManager
             boolean storeByValue
@@ -310,7 +289,7 @@ public class CacheFacadeImpl implements CacheFacade {
             MutableConfiguration mutConfig = new MutableConfiguration()
             mutConfig.setStoreByValue(storeByValue).setStatisticsEnabled(true)
             // any defaults we want here? better to use underlying defaults and conf file settings only
-            newCache = cacheManager.createCache(fullCacheName, mutConfig)
+            newCache = cacheManager.createCache(cacheName, mutConfig)
         }
 
         // NOTE: put in localCacheMap done in caller (getCache)
@@ -331,7 +310,7 @@ public class CacheFacadeImpl implements CacheFacade {
                 if (entry.getLastAccessTime()) im.lastAccessTime = new Timestamp(entry.getLastAccessTime())
                 elementInfoList.add(im)
             }
-            if (orderByField) StupidUtilities.orderMapList(elementInfoList, [orderByField])
+            if (orderByField) CollectionUtilities.orderMapList(elementInfoList, [orderByField])
             return elementInfoList
         } else {
             return new ArrayList<Map>()

@@ -32,7 +32,7 @@ class SystemScreenRenderTests extends Specification {
 
     def setupSpec() {
         ec = Moqui.getExecutionContext()
-        ec.user.loginUser("john.doe", "moqui", null)
+        ec.user.loginUser("john.doe", "moqui")
         screenTest = ec.screen.makeTest().baseScreenPath("apps/system")
     }
 
@@ -54,7 +54,7 @@ class SystemScreenRenderTests extends Specification {
     @Unroll
     def "render system screen #screenPath (#containsText1, #containsText2)"() {
         setup:
-        ScreenTestRender str = screenTest.render(screenPath, null, null)
+        ScreenTestRender str = screenTest.render(screenPath, [lastStandalone:"-2"], null)
         // logger.info("Rendered ${screenPath} in ${str.getRenderTime()}ms")
         boolean contains1 = containsText1 ? str.assertContains(containsText1) : true
         boolean contains2 = containsText2 ? str.assertContains(containsText2) : true
@@ -77,7 +77,7 @@ class SystemScreenRenderTests extends Specification {
         "ArtifactHitBins?artifactName=basic&artifactName_op=contains" | "moqui.basic.Enumeration" | "create"
         // Cache screens
         "Cache/CacheList" | "entity.definition" | "artifact.tarpit.hits"
-        "Cache/CacheElements?orderByField=key&cacheName=DEFAULT__l10n.message" | "\${artifactName}::en_US" | "evictionStrategy"
+        "Cache/CacheElements?orderByField=key&cacheName=l10n.message" | '${artifactName}::en_US' | "evictionStrategy"
 
         // Localization screens
         "Localization/Messages" | "Add" | "Añadir"

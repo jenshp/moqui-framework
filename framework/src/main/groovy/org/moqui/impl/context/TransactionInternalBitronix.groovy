@@ -61,12 +61,8 @@ class TransactionInternalBitronix implements TransactionInternal {
     @Override
     UserTransaction getUserTransaction() { return ut }
 
-    Properties getXaProperties() {
-
-    }
-
     @Override
-    DataSource getDataSource(EntityFacade ef, MNode datasourceNode, String tenantId) {
+    DataSource getDataSource(EntityFacade ef, MNode datasourceNode) {
         // NOTE: this is called during EFI init, so use the passed one and don't try to get from ECFI
         EntityFacadeImpl efi = (EntityFacadeImpl) ef
 
@@ -113,6 +109,7 @@ class TransactionInternalBitronix implements TransactionInternal {
         // pds.setShareTransactionConnections(false) // don't share connections in the ACCESSIBLE, needed?
         // pds.setIgnoreRecoveryFailures(false) // something to consider for XA recovery errors, quarantines by default
 
+        pds.setEnableJdbc4ConnectionTest(true) // use faster jdbc4 connection test
         // default is 0, disabled PreparedStatement cache (cache size per Connection)
         // NOTE: make this configurable? value too high or low?
         pds.setPreparedStatementCacheSize(100)
@@ -126,8 +123,11 @@ class TransactionInternalBitronix implements TransactionInternal {
             pds.setTestQuery(dsi.database.attribute("default-test-query"))
         }
 
+        logger.info("Initializing DataSource ${dsi.uniqueName} (${dsi.database.attribute('name')}) with properties: ${dsi.dsDetails}")
+
         // init the DataSource
         pds.init()
+        logger.info("Init DataSource ${dsi.uniqueName} (${dsi.database.attribute('name')}) isolation ${pds.getIsolationLevel()} (${isolationInt}), max pool ${pds.getMaxPoolSize()}")
 
         pdsList.add(pds)
 

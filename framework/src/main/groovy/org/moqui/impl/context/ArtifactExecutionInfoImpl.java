@@ -14,7 +14,9 @@
 package org.moqui.impl.context;
 
 import org.moqui.context.ArtifactExecutionInfo;
-import org.moqui.impl.StupidUtilities;
+import org.moqui.impl.entity.EntityValueBase;
+import org.moqui.util.CollectionUtilities;
+import org.moqui.util.StringUtilities;
 
 import java.io.IOException;
 import java.io.StringWriter;
@@ -26,8 +28,8 @@ import java.util.*;
 public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
 
     // NOTE: these need to be in a Map instead of the DB because Enumeration records may not yet be loaded
-    final static Map<ArtifactType, String> artifactTypeDescriptionMap = new EnumMap<>(ArtifactType.class);
-    final static Map<AuthzAction, String> artifactActionDescriptionMap = new EnumMap<>(AuthzAction.class);
+    private final static Map<ArtifactType, String> artifactTypeDescriptionMap = new EnumMap<>(ArtifactType.class);
+    private final static Map<AuthzAction, String> artifactActionDescriptionMap = new EnumMap<>(AuthzAction.class);
     static {
         artifactTypeDescriptionMap.put(AT_XML_SCREEN, "Screen"); artifactTypeDescriptionMap.put(AT_XML_SCREEN_TRANS, "Transition");
         artifactTypeDescriptionMap.put(AT_XML_SCREEN_CONTENT, "Screen Content");
@@ -42,32 +44,37 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
     public final String nameInternal;
     public final ArtifactType internalTypeEnum;
     public final AuthzAction internalActionEnum;
-    protected String actionDetail = "";
+    public final String actionDetail;
     protected Map<String, Object> parameters = null;
     public String internalAuthorizedUserId = null;
     public AuthzType internalAuthorizedAuthzType = null;
     public AuthzAction internalAuthorizedActionEnum = null;
     public boolean internalAuthorizationInheritable = false;
-    private Boolean internalAuthzWasRequired = null;
-    private Boolean internalAuthzWasGranted = null;
-    public Map<String, Object> internalAacv = null;
+    public boolean internalAuthzWasRequired = false;
+    public boolean isAccess = false;
+    public boolean trackArtifactHit = true;
+    private boolean internalAuthzWasGranted = false;
+    public ArtifactAuthzCheck internalAacv = null;
 
     //protected Exception createdLocation = null
     private ArtifactExecutionInfoImpl parentAeii = (ArtifactExecutionInfoImpl) null;
-    protected long startTime;
-    private long endTime = 0;
+    public final long startTimeMillis;
+    public final long startTimeNanos;
+    private long endTimeNanos = 0;
+    public Long outputSize = null;
     private ArrayList<ArtifactExecutionInfoImpl> childList = (ArrayList<ArtifactExecutionInfoImpl>) null;
     private long childrenRunningTime = 0;
 
-    public ArtifactExecutionInfoImpl(String name, ArtifactType typeEnum, AuthzAction actionEnum) {
+    public ArtifactExecutionInfoImpl(String name, ArtifactType typeEnum, AuthzAction actionEnum, String detail) {
         nameInternal = name;
         internalTypeEnum = typeEnum;
         internalActionEnum = actionEnum != null ? actionEnum : AUTHZA_ALL;
+        actionDetail = detail;
         //createdLocation = new Exception("Create AEII location for ${name}, type ${typeEnumId}, action ${actionEnumId}")
-        startTime = System.nanoTime();
+        startTimeMillis = System.currentTimeMillis();
+        startTimeNanos = System.nanoTime();
     }
 
-    public ArtifactExecutionInfoImpl setActionDetail(String detail) { this.actionDetail = detail; return this; }
     public ArtifactExecutionInfoImpl setParameters(Map<String, Object> parameters) { this.parameters = parameters; return this; }
 
     @Override
@@ -106,20 +113,24 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
     void setAuthorizationInheritable(boolean isAuthorizationInheritable) { this.internalAuthorizationInheritable = isAuthorizationInheritable; }
 
     @Override
-    public Boolean getAuthorizationWasRequired() { return internalAuthzWasRequired; }
-    void setAuthorizationWasRequired(boolean value) { internalAuthzWasRequired = value ? Boolean.TRUE : Boolean.FALSE; }
+    public boolean getAuthorizationWasRequired() { return internalAuthzWasRequired; }
+    void setAuthzReqdAndIsAccess(boolean authzReqd, boolean isAccess) {
+        internalAuthzWasRequired = authzReqd;
+        this.isAccess = isAccess;
+    }
+    public void setTrackArtifactHit(boolean tah) { trackArtifactHit = tah; }
     @Override
-    public Boolean getAuthorizationWasGranted() { return internalAuthzWasGranted; }
+    public boolean getAuthorizationWasGranted() { return internalAuthzWasGranted; }
     void setAuthorizationWasGranted(boolean value) { internalAuthzWasGranted = value ? Boolean.TRUE : Boolean.FALSE; }
 
-    Map<String, Object> getAacv() { return internalAacv; }
+    ArtifactAuthzCheck getAacv() { return internalAacv; }
 
-    public void copyAacvInfo(Map<String, Object> aacv, String userId, boolean wasGranted) {
+    public void copyAacvInfo(ArtifactAuthzCheck aacv, String userId, boolean wasGranted) {
         internalAacv = aacv;
         internalAuthorizedUserId = userId;
-        internalAuthorizedAuthzType = AuthzType.valueOf((String) aacv.get("authzTypeEnumId"));
-        internalAuthorizedActionEnum = AuthzAction.valueOf((String) aacv.get("authzActionEnumId"));
-        internalAuthorizationInheritable = "Y".equals(aacv.get("inheritAuthz"));
+        internalAuthorizedAuthzType = aacv.authzType;
+        internalAuthorizedActionEnum = aacv.authzAction;
+        internalAuthorizationInheritable = aacv.inheritAuthz;
         internalAuthzWasGranted = wasGranted;
     }
 
@@ -133,10 +144,11 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
         internalAuthzWasGranted = aeii.internalAuthzWasGranted;
     }
 
-    void setEndTime() { this.endTime = System.nanoTime(); }
+    void setEndTime() { this.endTimeNanos = System.nanoTime(); }
     @Override
-    public long getRunningTime() { return endTime != 0 ? endTime - startTime : 0; }
-    void calcChildTime(boolean recurse) {
+    public long getRunningTime() { return endTimeNanos != 0 ? endTimeNanos - startTimeNanos : 0; }
+    public double getRunningTimeMillisDouble() { return (endTimeNanos != 0 ? endTimeNanos - startTimeNanos : 0) / 1000000.0; }
+    private void calcChildTime(boolean recurse) {
         childrenRunningTime = 0;
         if (childList != null) for (ArtifactExecutionInfoImpl aeii: childList) {
             childrenRunningTime += aeii.getRunningTime();
@@ -159,7 +171,7 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
     @Override
     public ArtifactExecutionInfo getParent() { return parentAeii; }
     @Override
-    public BigDecimal getPercentOfParentTime() { return parentAeii != null && endTime != 0 ?
+    public BigDecimal getPercentOfParentTime() { return parentAeii != null && endTimeNanos != 0 ?
         new BigDecimal((getRunningTime() / parentAeii.getRunningTime()) * 100).setScale(2, BigDecimal.ROUND_HALF_UP) : BigDecimal.ZERO; }
 
 
@@ -177,21 +189,23 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
     public void print(Writer writer, int level, boolean children) {
         try {
             for (int i = 0; i < (level * 2); i++) writer.append(" ");
-            writer.append("[").append(parentAeii != null ? StupidUtilities.paddedString(getPercentOfParentTime().toPlainString(), 5, false) : "     ").append("%]");
-            writer.append("[").append(StupidUtilities.paddedString(getRunningTimeMillis().toPlainString(), 5, false)).append("]");
-            writer.append("[").append(StupidUtilities.paddedString(getThisRunningTimeMillis().toPlainString(), 3, false)).append("]");
-            writer.append("[").append(childList != null ? StupidUtilities.paddedString(getChildrenRunningTimeMillis().toPlainString(), 3, false) : "   ").append("] ");
-            writer.append(StupidUtilities.paddedString(getTypeDescription(), 10, true)).append(" ");
-            writer.append(StupidUtilities.paddedString(getActionDescription(), 7, true)).append(" ");
-            writer.append(StupidUtilities.paddedString(actionDetail, 5, true)).append(" ");
+            writer.append("[").append(parentAeii != null ? StringUtilities.paddedString(getPercentOfParentTime().toPlainString(), 5, false) : "     ").append("%]");
+            writer.append("[").append(StringUtilities.paddedString(getRunningTimeMillis().toPlainString(), 5, false)).append("]");
+            writer.append("[").append(StringUtilities.paddedString(getThisRunningTimeMillis().toPlainString(), 3, false)).append("]");
+            writer.append("[").append(childList != null ? StringUtilities.paddedString(getChildrenRunningTimeMillis().toPlainString(), 3, false) : "   ").append("] ");
+            writer.append(StringUtilities.paddedString(getTypeDescription(), 10, true)).append(" ");
+            writer.append(StringUtilities.paddedString(getActionDescription(), 7, true)).append(" ");
+            writer.append(StringUtilities.paddedString(actionDetail, 5, true)).append(" ");
             writer.append(nameInternal).append("\n");
 
             if (children && childList != null)
                 for (ArtifactExecutionInfoImpl aeii: childList) aeii.print(writer, level + 1, true);
-        } catch (IOException e) { }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
-    String getKeyString() { return nameInternal + ":" + internalTypeEnum.name() + ":" + internalActionEnum.name() + ":" + actionDetail; }
+    private String getKeyString() { return nameInternal + ":" + internalTypeEnum.name() + ":" + internalActionEnum.name() + ":" + actionDetail; }
 
     @SuppressWarnings("unchecked")
     static List<Map<String, Object>> hotSpotByTime(List<ArtifactExecutionInfoImpl> aeiiList, boolean ownTime, String orderBy) {
@@ -217,7 +231,7 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
                 // calc new average, add knockOutCount times to fill in gaps, calc new time total
                 BigDecimal newTotal = BigDecimal.ZERO;
                 BigDecimal newMax = BigDecimal.ZERO;
-                for (BigDecimal time: newTimes) { newTotal.add(time); if (time.compareTo(newMax) > 0) newMax = time; }
+                for (BigDecimal time: newTimes) { newTotal = newTotal.add(time); if (time.compareTo(newMax) > 0) newMax = time; }
                 BigDecimal newAvg = newTotal.divide(new BigDecimal(newTimes.size()), 2, BigDecimal.ROUND_HALF_UP);
                 // long newTimeAvg = newAvg.setScale(0, BigDecimal.ROUND_HALF_UP)
                 newTotal = newTotal.add(newAvg.multiply(new BigDecimal(knockOutCount)));
@@ -229,11 +243,11 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
 
         List<String> obList = new LinkedList<>();
         if (orderBy != null && orderBy.length() > 0) obList.add(orderBy); else obList.add("-time");
-        StupidUtilities.orderMapList(hotSpotList, obList);
+        CollectionUtilities.orderMapList(hotSpotList, obList);
         return hotSpotList;
     }
     @SuppressWarnings("unchecked")
-    void addToMapByTime(Map<String, Map<String, Object>> timeByArtifact, boolean ownTime) {
+    private void addToMapByTime(Map<String, Map<String, Object>> timeByArtifact, boolean ownTime) {
         String key = getKeyString();
         Map<String, Object> val = timeByArtifact.get(key);
         BigDecimal curTime = ownTime ? getThisRunningTimeMillis() : getRunningTimeMillis();
@@ -270,14 +284,14 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
     static void printHotSpotList(Writer writer, List<Map> infoList) throws IOException {
         // "[${time}:${timeMin}:${timeAvg}:${timeMax}][${count}] ${type} ${action} ${actionDetail} ${name}"
         for (Map info: infoList) {
-            writer.append("[").append(StupidUtilities.paddedString(((BigDecimal) info.get("time")).toPlainString(), 8, false)).append(":");
-            writer.append(StupidUtilities.paddedString(((BigDecimal) info.get("timeMin")).toPlainString(), 7, false)).append(":");
-            writer.append(StupidUtilities.paddedString(((BigDecimal) info.get("timeAvg")).toPlainString(), 7, false)).append(":");
-            writer.append(StupidUtilities.paddedString(((BigDecimal) info.get("timeMax")).toPlainString(), 7, false)).append("]");
-            writer.append("[").append(StupidUtilities.paddedString(((BigDecimal) info.get("count")).toPlainString(), 4, false)).append("] ");
-            writer.append(StupidUtilities.paddedString((String) info.get("type"), 10, true)).append(" ");
-            writer.append(StupidUtilities.paddedString((String) info.get("action"), 7, true)).append(" ");
-            writer.append(StupidUtilities.paddedString((String) info.get("actionDetail"), 5, true)).append(" ");
+            writer.append("[").append(StringUtilities.paddedString(((BigDecimal) info.get("time")).toPlainString(), 8, false)).append(":");
+            writer.append(StringUtilities.paddedString(((BigDecimal) info.get("timeMin")).toPlainString(), 7, false)).append(":");
+            writer.append(StringUtilities.paddedString(((BigDecimal) info.get("timeAvg")).toPlainString(), 7, false)).append(":");
+            writer.append(StringUtilities.paddedString(((BigDecimal) info.get("timeMax")).toPlainString(), 7, false)).append("]");
+            writer.append("[").append(StringUtilities.paddedString(((BigDecimal) info.get("count")).toPlainString(), 4, false)).append("] ");
+            writer.append(StringUtilities.paddedString((String) info.get("type"), 10, true)).append(" ");
+            writer.append(StringUtilities.paddedString((String) info.get("action"), 7, true)).append(" ");
+            writer.append(StringUtilities.paddedString((String) info.get("actionDetail"), 5, true)).append(" ");
             writer.append((String) info.get("name")).append("\n");
         }
     }
@@ -290,7 +304,7 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
         return topLevelList;
     }
     @SuppressWarnings("unchecked")
-    void consolidateArtifactInfo(List<Map> topLevelList, Map<String, Map<String, Object>> flatMap, Map parentArtifactMap) {
+    private void consolidateArtifactInfo(List<Map> topLevelList, Map<String, Map<String, Object>> flatMap, Map parentArtifactMap) {
         String key = getKeyString();
         Map<String, Object> artifactMap = flatMap.get(key);
         if (artifactMap == null) {
@@ -321,23 +335,23 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
 
         if (childList != null) for (ArtifactExecutionInfoImpl aeii: childList) aeii.consolidateArtifactInfo(topLevelList, flatMap, artifactMap);
     }
-    static String printArtifactInfoList(List<Map> infoList) throws IOException {
+    public static String printArtifactInfoList(List<Map> infoList) throws IOException {
         StringWriter sw = new StringWriter();
         printArtifactInfoList(sw, infoList, 0);
         return sw.toString();
     }
     @SuppressWarnings("unchecked")
-    static void printArtifactInfoList(Writer writer, List<Map> infoList, int level) throws IOException {
+    public static void printArtifactInfoList(Writer writer, List<Map> infoList, int level) throws IOException {
         // "[${time}:${thisTime}:${childrenTime}][${count}] ${type} ${action} ${actionDetail} ${name}"
         for (Map info: infoList) {
             for (int i = 0; i < level; i++) writer.append("|").append(" ");
-            writer.append("[").append(StupidUtilities.paddedString(((BigDecimal) info.get("time")).toPlainString(), 8, false)).append(":");
-            writer.append(StupidUtilities.paddedString(((BigDecimal) info.get("thisTime")).toPlainString(), 6, false)).append(":");
-            writer.append(StupidUtilities.paddedString(((BigDecimal) info.get("childrenTime")).toPlainString(), 6, false)).append("]");
-            writer.append("[").append(StupidUtilities.paddedString(((BigDecimal) info.get("count")).toPlainString(), 4, false)).append("] ");
-            writer.append(StupidUtilities.paddedString((String) info.get("type"), 10, true)).append(" ");
-            writer.append(StupidUtilities.paddedString((String) info.get("action"), 7, true)).append(" ");
-            writer.append(StupidUtilities.paddedString((String) info.get("actionDetail"), 5, true)).append(" ");
+            writer.append("[").append(StringUtilities.paddedString(((BigDecimal) info.get("time")).toPlainString(), 8, false)).append(":");
+            writer.append(StringUtilities.paddedString(((BigDecimal) info.get("thisTime")).toPlainString(), 6, false)).append(":");
+            writer.append(StringUtilities.paddedString(((BigDecimal) info.get("childrenTime")).toPlainString(), 6, false)).append("]");
+            writer.append("[").append(StringUtilities.paddedString(((BigDecimal) info.get("count")).toPlainString(), 4, false)).append("] ");
+            writer.append(StringUtilities.paddedString((String) info.get("type"), 10, true)).append(" ");
+            writer.append(StringUtilities.paddedString((String) info.get("action"), 7, true)).append(" ");
+            writer.append(StringUtilities.paddedString((String) info.get("actionDetail"), 5, true)).append(" ");
             writer.append((String) info.get("name")).append("\n");
             // if we get past level 25 just give up, probably a loop in the tree
             if (level < 25) {
@@ -352,5 +366,34 @@ public class ArtifactExecutionInfoImpl implements ArtifactExecutionInfo {
     @Override
     public String toString() {
         return "[name:'" + nameInternal + "', type:'" + internalTypeEnum + "', action:'" + internalActionEnum + "', required: " + internalAuthzWasRequired + ", granted:" + internalAuthzWasGranted + ", user:'" + internalAuthorizedUserId + "', authz:'" + internalAuthorizedAuthzType + "', authAction:'" + internalAuthorizedActionEnum + "', inheritable:" + internalAuthorizationInheritable + ", runningTime:" + getRunningTime() + "]";
+    }
+
+    public static class ArtifactAuthzCheck {
+        public String userGroupId, artifactAuthzId, authzServiceName;
+        public String artifactGroupId, artifactName, filterMap;
+        public ArtifactType artifactType;
+        public AuthzAction authzAction;
+        public AuthzType authzType;
+        public boolean nameIsPattern, inheritAuthz;
+        public ArtifactAuthzCheck(EntityValueBase aacvEvb) {
+            Map<String, Object> aacvMap = aacvEvb.getValueMap();
+            userGroupId = (String) aacvMap.get("userGroupId");
+            artifactAuthzId = (String) aacvMap.get("artifactAuthzId");
+            authzServiceName = (String) aacvMap.get("authzServiceName");
+
+            artifactGroupId = (String) aacvMap.get("artifactGroupId");
+            artifactName = (String) aacvMap.get("artifactName");
+            filterMap = (String) aacvMap.get("filterMap");
+
+            String artifactTypeEnumId = (String) aacvMap.get("artifactTypeEnumId");
+            artifactType = artifactTypeEnumId != null ? ArtifactType.valueOf(artifactTypeEnumId) : null;
+            String authzActionEnumId = (String) aacvMap.get("authzActionEnumId");
+            authzAction = authzActionEnumId != null ? AuthzAction.valueOf(authzActionEnumId) : null;
+            String authzTypeEnumId = (String) aacvMap.get("authzTypeEnumId");
+            authzType = authzTypeEnumId != null ? AuthzType.valueOf(authzTypeEnumId) : null;
+
+            nameIsPattern = "Y".equals(aacvMap.get("nameIsPattern"));
+            inheritAuthz = "Y".equals(aacvMap.get("inheritAuthz"));
+        }
     }
 }

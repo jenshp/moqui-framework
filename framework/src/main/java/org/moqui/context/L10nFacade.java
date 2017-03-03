@@ -35,11 +35,14 @@ public interface L10nFacade {
     /** Format currency amount for user to view.
      * @param amount An object representing the amount, should be a subclass of Number.
      * @param uomId The uomId (ISO currency code), required.
-     * @param fractionDigits Number of digits after the decimal point to display. If null defaults to 2.
+     * @param fractionDigits Number of digits after the decimal point to display. If null defaults to number defined
+     *                       by java.util.Currency.defaultFractionDigits() for the specified currency in uomId.
      * @return The formatted currency amount.
      */
     String formatCurrency(Object amount, String uomId, Integer fractionDigits);
+    String formatCurrency(Object amount, String uomId);
     String formatCurrency(Object amount, String uomId, Integer fractionDigits, Locale locale);
+    String formatCurrency(Object amount, String uomId, Integer fractionDigits, Locale locale, boolean hideSymbol);
 
     /** Format a Number, Timestamp, Date, Time, or Calendar object using the given format string. If no format string
      * is specified the default for the user's locale and time zone will be used.

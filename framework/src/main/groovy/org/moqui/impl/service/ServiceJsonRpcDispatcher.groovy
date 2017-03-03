@@ -37,13 +37,13 @@ public class ServiceJsonRpcDispatcher {
     final static int INVALID_PARAMS = -32602 // Invalid method parameter(s).
     final static int INTERNAL_ERROR = -32603 // Internal JSON-RPC error.
 
-    protected ExecutionContextImpl eci
+    private final ExecutionContextImpl eci
 
     public ServiceJsonRpcDispatcher(ExecutionContextImpl eci) {
         this.eci = eci
     }
 
-    public void dispatch(HttpServletRequest request, HttpServletResponse response) {
+    public void dispatch() {
         Map callMap = eci.web.getRequestParameters()
         if (callMap._requestBodyJsonList) {
             List callList = (List) callMap._requestBodyJsonList
@@ -68,7 +68,7 @@ public class ServiceJsonRpcDispatcher {
 
         String errorMessage = null
         Integer errorCode = null
-        ServiceDefinition sd = method ? eci.ecfi.serviceFacade.getServiceDefinition(method) : null
+        ServiceDefinition sd = method ? eci.serviceFacade.getServiceDefinition(method) : null
         if (eci.web.getRequestParameters()._requestBodyJsonParseError) {
             errorMessage = eci.web.getRequestParameters()._requestBodyJsonParseError
             errorCode = PARSE_ERROR
@@ -82,7 +82,7 @@ public class ServiceJsonRpcDispatcher {
             // We expect named parameters (JSON object)
             errorMessage = "Parameters must be named parameters (JSON object, Java Map), got type [${paramsObj.class.getName()}]"
             errorCode = INVALID_PARAMS
-        } else if (sd.serviceNode.attribute("allow-remote") != "true") {
+        } else if (!sd.allowRemote) {
             errorMessage = "Service [${sd.serviceName}] does not allow remote calls"
             errorCode = METHOD_NOT_FOUND
         }
@@ -90,7 +90,7 @@ public class ServiceJsonRpcDispatcher {
         Map result = null
         if (errorMessage == null) {
             try {
-                result = eci.service.sync().name(sd.getServiceName()).parameters((Map) paramsObj).call()
+                result = eci.service.sync().name(sd.serviceName).parameters((Map) paramsObj).call()
                 if (eci.getMessage().hasError()) {
                     logger.warn("Got errors in JSON-RPC call to service [${sd.serviceName}]: ${eci.message.errorsString}")
                     errorMessage = eci.message.errorsString
@@ -98,12 +98,12 @@ public class ServiceJsonRpcDispatcher {
                     errorCode = HttpServletResponse.SC_INTERNAL_SERVER_ERROR
                 }
             } catch (ArtifactAuthorizationException e) {
-                logger.error("Authz error calling service ${sd.getServiceName()} from JSON-RPC request: ${e.toString()}", e)
+                logger.error("Authz error calling service ${sd.serviceName} from JSON-RPC request: ${e.toString()}", e)
                 errorMessage = e.getMessage()
                 // could use whatever code here as long as it is not -32768 to -32000, this was chosen somewhat arbitrarily
                 errorCode = HttpServletResponse.SC_FORBIDDEN
             } catch (Exception e) {
-                logger.error("Error calling service ${sd.getServiceName()} from JSON-RPC request: ${e.toString()}", e)
+                logger.error("Error calling service ${sd.serviceName} from JSON-RPC request: ${e.toString()}", e)
                 errorMessage = e.getMessage()
                 // could use whatever code here as long as it is not -32768 to -32000, this was chosen somewhat arbitrarily
                 errorCode = HttpServletResponse.SC_INTERNAL_SERVER_ERROR

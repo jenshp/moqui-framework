@@ -14,7 +14,7 @@
 package org.moqui.impl.context.renderer
 
 import org.moqui.context.ExecutionContextFactory
-import org.moqui.context.ResourceReference
+import org.moqui.resource.ResourceReference
 import org.moqui.context.TemplateRenderer
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.jcache.MCache
@@ -46,7 +46,7 @@ class MarkdownTemplateRenderer implements TemplateRenderer {
         String mdText;
         if (templateMarkdownLocationCache instanceof MCache) {
             MCache<String, String> mCache = (MCache) templateMarkdownLocationCache;
-            ResourceReference rr = ecfi.getResourceFacade().getLocationReference(location);
+            ResourceReference rr = ecfi.resourceFacade.getLocationReference(location);
             long lastModified = rr != null ? rr.getLastModified() : 0L;
             mdText = mCache.get(location, lastModified);
         } else {

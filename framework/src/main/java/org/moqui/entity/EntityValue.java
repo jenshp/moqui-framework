@@ -16,32 +16,37 @@ package org.moqui.entity;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 
+import javax.annotation.Nonnull;
 import javax.sql.rowset.serial.SerialBlob;
 import java.io.Externalizable;
 import java.io.Writer;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 
-/**
- * Entity Value Interface - Represents a single database record.
- *
- */
+/** Entity Value Interface - Represents a single database record. */
 @SuppressWarnings("unused")
 public interface EntityValue extends Map<String, Object>, Externalizable, Comparable<EntityValue>, Cloneable {
 
     String getEntityName();
 
+    /** Returns true if any field has been modified */
     boolean isModified();
+    /** Returns true if the field has been modified */
     boolean isFieldModified(String name);
+    /** Returns true if a value for the field is set, even if it is null */
     boolean isFieldSet(String name);
+    /** Returns true if the name is a valid field name for the entity this is a value of,
+     * false otherwise (meaning get(), set(), etc calls with throw an exception with the field name) */
+    boolean isField(String name);
 
     boolean isMutable();
 
     /** Gets a cloned, mutable Map with the field values that is independent of this value object. Can be augmented or
      * modified without modifying or being constrained by this entity value. */
-    Map getMap();
+    Map<String, Object> getMap();
 
     /** Get the named field.
      *
@@ -57,6 +62,11 @@ public interface EntityValue extends Map<String, Object>, Externalizable, Compar
      * @return Object with the value of the field, or the related EntityValue or EntityList.
      */
     Object get(String name);
+
+    /** Get simple fields only (no localization, no relationship) and don't check to see if it is a valid field; mostly
+     * for performance reasons and for well tested code with known field names. If it is not a valid field name will
+     * just return null and not throw an error, ie doesn't check for valid field names. */
+    Object getNoCheckSimple(String name);
 
     /** Returns true if the entity contains all of the primary key fields. */
     boolean containsPrimaryKey();
@@ -141,6 +151,7 @@ public interface EntityValue extends Map<String, Object>, Externalizable, Compar
      * @param that Object to compare this to
      * @return int representing the result of the comparison (-1,0, or 1)
      */
+    @Override
     int compareTo(EntityValue that);
 
     /** Returns true if all entries in the Map match field values. */
@@ -149,13 +160,11 @@ public interface EntityValue extends Map<String, Object>, Externalizable, Compar
     EntityValue cloneValue();
 
     /** Creates a record for this entity value.
-     *
      * @return reference to this for convenience
      */
     EntityValue create() throws EntityException;
 
     /** Creates a record for this entity value, or updates the record if one exists that matches the primary key.
-     *
      * @return reference to this for convenience
      */
     EntityValue createOrUpdate() throws EntityException;
@@ -163,13 +172,11 @@ public interface EntityValue extends Map<String, Object>, Externalizable, Compar
     EntityValue store() throws EntityException;
 
     /** Updates the record that matches the primary key.
-     *
      * @return reference to this for convenience
      */
     EntityValue update() throws EntityException;
 
     /** Deletes the record that matches the primary key.
-     *
      * @return reference to this for convenience
      */
     EntityValue delete() throws EntityException;
@@ -201,11 +208,17 @@ public interface EntityValue extends Map<String, Object>, Externalizable, Compar
      */
     EntityValue findRelatedOne(String relationshipName, Boolean useCache, Boolean forUpdate) throws EntityException;
 
+    long findRelatedCount(final String relationshipName, Boolean useCache);
+
     /** Remove the named Related Entity for the EntityValue from the persistent store
      * @param relationshipName String containing the relationship name which is the combination of relationship.title
      *   and relationship.related-entity-name as specified in the entity XML definition file
      */
     void deleteRelated(String relationshipName) throws EntityException;
+
+    /** Delete this record plus records for all relationships specified. If any records exist for other relationships not specified
+     * that depend on this record returns false and does not delete anything. Otherwise returns true. */
+    boolean deleteWithRelated(Set<String> relationshipsToDelete);
 
     /**
      * Checks to see if all foreign key records exist in the database. Will create a dummy value for
@@ -213,11 +226,10 @@ public interface EntityValue extends Map<String, Object>, Externalizable, Compar
      *
      * @param insertDummy Create a dummy record using the provided fields
      * @return true if all FKs exist (or when all missing are created)
-     * @throws EntityException
      */
     boolean checkFks(boolean insertDummy) throws EntityException;
 
-    long checkAgainstDatabase(List messages);
+    long checkAgainstDatabase(List<String> messages);
 
     /** Makes an XML Element object with an attribute for each field of the entity
      * @param document The XML Document that the new Element will be part of

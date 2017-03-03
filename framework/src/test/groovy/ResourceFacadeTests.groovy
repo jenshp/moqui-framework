@@ -15,9 +15,8 @@
 import spock.lang.*
 
 import org.moqui.context.ExecutionContext
-import org.moqui.entity.EntityValue
 import org.moqui.Moqui
-import org.moqui.context.ResourceReference
+import org.moqui.resource.ResourceReference
 
 class ResourceFacadeTests extends Specification {
     @Shared
@@ -89,7 +88,7 @@ class ResourceFacadeTests extends Specification {
 
         where:
         expression | result
-        "ec.tenantId" | ec.tenantId
+        "ec.factory.moquiVersion" | ec.factory.moquiVersion
         "null" | null
         "undefinedVariable" | null
     }
@@ -101,7 +100,7 @@ class ResourceFacadeTests extends Specification {
 
         where:
         inputString | result
-        "Tenant: \${ec.tenantId}" | "Tenant: ${ec.tenantId}"
+        'Version: ${ec.factory.moquiVersion}' | "Version: ${ec.factory.moquiVersion}"
         "plain string" | "plain string"
     }
 }

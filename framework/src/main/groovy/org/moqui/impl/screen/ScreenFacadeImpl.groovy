@@ -15,7 +15,8 @@ package org.moqui.impl.screen
 
 import freemarker.template.Template
 import groovy.transform.CompileStatic
-import org.moqui.context.ResourceReference
+import org.moqui.BaseException
+import org.moqui.resource.ResourceReference
 import org.moqui.screen.ScreenFacade
 import org.moqui.screen.ScreenRender
 import org.moqui.impl.context.ExecutionContextFactoryImpl
@@ -51,7 +52,6 @@ public class ScreenFacadeImpl implements ScreenFacade {
     protected final Cache<String, MNode> dbFormNodeByIdCache
 
     protected final Map<String, Map<String, String>> themeIconByTextByTheme = new HashMap<>()
-    protected final Map<String, MNode> webappNodeByName = new HashMap<>()
 
     ScreenFacadeImpl(ExecutionContextFactoryImpl ecfi) {
         this.ecfi = ecfi
@@ -65,9 +65,6 @@ public class ScreenFacadeImpl implements ScreenFacade {
         widgetTemplateLocationCache = ecfi.cacheFacade.getCache("widget.template.location", String.class, MNode.class)
         screenFindPathCache = ecfi.cacheFacade.getCache("screen.find.path", String.class, ArrayList.class)
         dbFormNodeByIdCache = ecfi.cacheFacade.getCache("screen.form.db.node", String.class, MNode.class)
-
-        for (MNode webappNode in ecfi.confXmlRoot.first("webapp-list").children("webapp"))
-            webappNodeByName.put(webappNode.attribute("name"), webappNode)
 
         List<MNode> stoNodes = ecfi.getConfXmlRoot().first("screen-facade").children("screen-text-output")
         for (MNode stoNode in stoNodes) {
@@ -121,11 +118,20 @@ public class ScreenFacadeImpl implements ScreenFacade {
         if (screenLocationCache.containsKey(location)) return true
 
         try {
-            ScreenDefinition checkSd = getScreenDefinition(location)
-            return (checkSd != null)
+            // we checked the screenLocationCache above, so now do a quick file parse to see if it is a XML file with 'screen' root
+            //     element; this is faster and more reliable when a screen is not loaded, screen doesn't have to be fully valid
+            //     which is important as with the old approach if there was an error parsing or compiling the screen it was a false
+            //     negative and the screen source would be sent in response
+            ResourceReference screenRr = ecfi.resourceFacade.getLocationReference(location)
+            MNode screenNode = MNode.parseRootOnly(screenRr)
+            return screenNode != null && "screen".equals(screenNode.getName())
+
+            // old approach
+            // ScreenDefinition checkSd = getScreenDefinition(location)
+            // return (checkSd != null)
         } catch (Throwable t) {
             // ignore the error, just checking to see if it is a screen
-            if (logger.isInfoEnabled()) logger.info("Error when checking to see if [${location}] is a XML Screen: ${t.toString()}")
+            if (logger.isInfoEnabled()) logger.info("Error when checking to see if [${location}] is a XML Screen: ${t.toString()}", t)
             return false
         }
     }
@@ -142,7 +148,7 @@ public class ScreenFacadeImpl implements ScreenFacade {
         ScreenDefinition sd = (ScreenDefinition) screenLocationCache.get(location)
         if (sd != null) return sd
 
-        ResourceReference screenRr = ecfi.getResourceFacade().getLocationReference(location)
+        ResourceReference screenRr = ecfi.resourceFacade.getLocationReference(location)
 
         ScreenDefinition permSd = (ScreenDefinition) screenLocationPermCache.get(location)
         if (permSd != null) {
@@ -179,9 +185,7 @@ public class ScreenFacadeImpl implements ScreenFacade {
         }
 
         MNode screenNode = MNode.parse(screenRr)
-        if (screenNode == null) {
-            throw new IllegalArgumentException("Cound not find definition for screen location ${location}")
-        }
+        if (screenNode == null) throw new IllegalArgumentException("Cound not find definition for screen location ${location}")
 
         sd = new ScreenDefinition(this, screenNode, location)
         // logger.warn("========= loaded screen [${location}] supports LM ${screenRr.supportsLastModified()}, LM: ${screenRr.getLastModified()}")
@@ -216,16 +220,16 @@ public class ScreenFacadeImpl implements ScreenFacade {
 
     Template getTemplateByMode(String renderMode) {
         Template template = (Template) screenTemplateModeCache.get(renderMode)
-        if (template) return template
+        if (template != null) return template
 
         template = makeTemplateByMode(renderMode)
-        if (!template) throw new IllegalArgumentException("Could not find screen render template for mode [${renderMode}]")
+        if (template == null) throw new IllegalArgumentException("Could not find screen render template for mode [${renderMode}]")
         return template
     }
 
     protected synchronized Template makeTemplateByMode(String renderMode) {
         Template template = (Template) screenTemplateModeCache.get(renderMode)
-        if (template) return template
+        if (template != null) return template
 
         MNode stoNode = ecfi.getConfXmlRoot().first("screen-facade")
                 .first({ MNode it -> it.name == "screen-text-output" && it.attribute("type") == renderMode })
@@ -248,13 +252,13 @@ public class ScreenFacadeImpl implements ScreenFacade {
 
     Template getTemplateByLocation(String templateLocation) {
         Template template = (Template) screenTemplateLocationCache.get(templateLocation)
-        if (template) return template
+        if (template != null) return template
         return makeTemplateByLocation(templateLocation)
     }
 
     protected synchronized Template makeTemplateByLocation(String templateLocation) {
         Template template = (Template) screenTemplateLocationCache.get(templateLocation)
-        if (template) return template
+        if (template != null) return template
 
         // NOTE: this is a special case where we need something to call #recurse so that all includes can be straight libraries
         String rootTemplate = """<#include "${templateLocation}"/><#visit widgetsNode>"""
@@ -297,8 +301,24 @@ public class ScreenFacadeImpl implements ScreenFacade {
         }
         return themeIconByText
     }
-    MNode getWebappNode(String webappName) { return webappNodeByName.get(webappName) as MNode }
+    String rootScreenFromHost(String host, String webappName) {
+        ExecutionContextFactoryImpl.WebappInfo webappInfo = ecfi.getWebappInfo(webappName)
+        MNode webappNode = webappInfo.webappNode
+        MNode wildcardHost = (MNode) null
+        for (MNode rootScreenNode in webappNode.children("root-screen")) {
+            String hostAttr = rootScreenNode.attribute("host")
+            if (".*".equals(hostAttr)) {
+                // remember wildcard host, default to it if no other matches (just in case put earlier in the list than others)
+                wildcardHost = rootScreenNode
+            } else if (host.matches(hostAttr)) {
+                return rootScreenNode.attribute("location")
+            }
+        }
+        if (wildcardHost != null) return wildcardHost.attribute("location")
+        throw new BaseException("Could not find root screen for host: ${host}")
+    }
 
+    /** Called from ArtifactStats screen */
     List<ScreenInfo> getScreenInfoList(String rootLocation, int levels) {
         ScreenInfo rootInfo = new ScreenInfo(getScreenDefinition(rootLocation), null, null, 0)
         List<ScreenInfo> infoList = []
@@ -342,7 +362,8 @@ public class ScreenFacadeImpl implements ScreenFacade {
             sections = sd.sectionByName.size()
             transitions = sd.transitionByName.size()
             for (TransitionItem ti in sd.transitionByName.values()) if (ti.hasActionsOrSingleService()) transitionsWithActions++
-            isNonPlaceholder = forms || sections || transitions
+            isNonPlaceholder = forms > 0 || sections > 0 || transitions > 3
+            // if (isNonPlaceholder) logger.info("Screen ${name} forms ${forms} sections ${sections} transitions ${transitions}")
 
             // trickle up totals
             ScreenInfo curParent = parentInfo
@@ -429,8 +450,8 @@ public class ScreenFacadeImpl implements ScreenFacade {
                 if (ri.urlType && ri.urlType != "transition" && ri.urlType != "screen") continue
                 String expandedUrl = ri.url
                 if (expandedUrl.contains('${')) expandedUrl = ecfi.getResource().expand(expandedUrl, "")
-                ScreenUrlInfo sui = ScreenUrlInfo.getScreenUrlInfo(ecfi.getScreenFacade(), si.rootInfo.sd,
-                        si.sd, si.screenPath, expandedUrl, null)
+                ScreenUrlInfo sui = ScreenUrlInfo.getScreenUrlInfo(ecfi.screenFacade, si.rootInfo.sd,
+                        si.sd, si.screenPath, expandedUrl, 0)
                 if (sui.targetScreen == null) continue
                 String targetScreenPath = screenPathToString(sui.getPreTransitionPathNameList())
                 responseScreenPathSet.add(targetScreenPath)

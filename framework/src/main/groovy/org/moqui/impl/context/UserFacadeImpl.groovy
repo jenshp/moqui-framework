@@ -14,17 +14,16 @@
 package org.moqui.impl.context
 
 import groovy.transform.CompileStatic
-import org.apache.commons.codec.binary.Base64
-import org.joda.time.DateTimeZone
-import org.joda.time.MutableDateTime
-import org.moqui.context.NotificationMessage
+import org.moqui.context.ArtifactExecutionInfo
 import org.moqui.entity.EntityCondition
+import org.moqui.impl.context.ArtifactExecutionInfoImpl.ArtifactAuthzCheck
 import org.moqui.impl.entity.EntityValueBase
+import org.moqui.impl.screen.ScreenUrlInfo
 import org.moqui.impl.util.MoquiShiroRealm
 import org.moqui.util.MNode
+import org.moqui.util.StringUtilities
 
 import javax.websocket.server.HandshakeRequest
-import java.security.SecureRandom
 import java.sql.Timestamp
 import javax.servlet.http.Cookie
 import javax.servlet.http.HttpServletRequest
@@ -41,7 +40,6 @@ import org.apache.shiro.web.session.HttpServletSession
 import org.moqui.context.UserFacade
 import org.moqui.entity.EntityValue
 import org.moqui.entity.EntityList
-import org.moqui.impl.entity.EntityListImpl
 import org.apache.shiro.subject.support.DefaultSubjectContext
 
 import org.slf4j.Logger
@@ -68,7 +66,7 @@ class UserFacadeImpl implements UserFacade {
 
     UserFacadeImpl(ExecutionContextImpl eci) {
         this.eci = eci
-        pushUser(null, eci.tenantId)
+        pushUser(null)
     }
 
     Subject makeEmptySubject() {
@@ -77,9 +75,9 @@ class UserFacadeImpl implements UserFacade {
             if (request != null) wsc.setServletRequest(request)
             if (response != null) wsc.setServletResponse(response)
             wsc.setSession(new HttpServletSession(session, request?.getServerName()))
-            return eci.getEcfi().getSecurityManager().createSubject(wsc)
+            return eci.ecfi.getSecurityManager().createSubject(wsc)
         } else {
-            return eci.getEcfi().getSecurityManager().createSubject(new DefaultSubjectContext())
+            return eci.ecfi.getSecurityManager().createSubject(new DefaultSubjectContext())
         }
     }
 
@@ -91,7 +89,7 @@ class UserFacadeImpl implements UserFacade {
         Subject webSubject = makeEmptySubject()
         if (webSubject.authenticated) {
             // effectively login the user
-            pushUserSubject(webSubject, null)
+            pushUserSubject(webSubject)
             if (logger.traceEnabled) logger.trace("For new request found user [${username}] in the session")
         } else {
             if (logger.traceEnabled) logger.trace("For new request NO user authenticated in the session")
@@ -101,41 +99,41 @@ class UserFacadeImpl implements UserFacade {
         // NOTE: do this even if there is another user logged in, will go on stack
         Map secureParameters = eci.webImpl.getSecureRequestParameters()
         String authzHeader = request.getHeader("Authorization")
-        if (authzHeader != null && authzHeader.length() > 6 && authzHeader.substring(0, 6).equals("Basic ")) {
+        if (authzHeader != null && authzHeader.length() > 6 && authzHeader.startsWith("Basic ")) {
             String basicAuthEncoded = authzHeader.substring(6).trim()
             String basicAuthAsString = new String(basicAuthEncoded.decodeBase64())
-            if (basicAuthAsString.indexOf(":") > 0) {
-                String username = basicAuthAsString.substring(0, basicAuthAsString.indexOf(":"))
-                String password = basicAuthAsString.substring(basicAuthAsString.indexOf(":") + 1)
-                String tenantId = secureParameters.authTenantId
-                this.loginUser(username, password, tenantId)
+            int indexOfColon = basicAuthAsString.indexOf(":")
+            if (indexOfColon > 0) {
+                String username = basicAuthAsString.substring(0, indexOfColon)
+                String password = basicAuthAsString.substring(indexOfColon + 1)
+                this.loginUser(username, password)
             } else {
                 logger.warn("For HTTP Basic Authorization got bad credentials string. Base64 encoded is [${basicAuthEncoded}] and after decoding is [${basicAuthAsString}].")
             }
         } else if (request.getHeader("api_key") || request.getHeader("login_key")) {
             String loginKey = request.getHeader("api_key") ?: request.getHeader("login_key")
-            String tenantId = request.getHeader("tenant_id")
-            this.loginUserKey(loginKey.trim(), tenantId?.trim())
+            this.loginUserKey(loginKey.trim())
         } else if (secureParameters.api_key || secureParameters.login_key) {
             String loginKey = secureParameters.api_key ?: secureParameters.login_key
-            String tenantId = secureParameters.tenant_id
-            this.loginUserKey(loginKey.trim(), tenantId?.trim())
+            this.loginUserKey(loginKey.trim())
         } else if (secureParameters.authUsername) {
             // try the Moqui-specific parameters for instant login
             // if we have credentials coming in anywhere other than URL parameters, try logging in
             String authUsername = secureParameters.authUsername
             String authPassword = secureParameters.authPassword
-            String authTenantId = secureParameters.authTenantId
-            this.loginUser(authUsername, authPassword, authTenantId)
+            this.loginUser(authUsername, authPassword)
         }
+        if (eci.messageFacade.hasError()) request.setAttribute("moqui.login.error", "true")
 
         this.visitId = session.getAttribute("moqui.visitId")
         if (!this.visitId && !eci.getSkipStats()) {
-            MNode serverStatsNode = eci.getEcfi().getServerStatsNode()
+            MNode serverStatsNode = eci.ecfi.getServerStatsNode()
+            ScreenUrlInfo sui = ScreenUrlInfo.getScreenUrlInfo(eci.screenFacade, request)
+            boolean isJustContent = sui.fileResourceRef != null
 
             // handle visitorId and cookie
-            String cookieVisitorId = null
-            if (serverStatsNode.attribute('visitor-enabled') != "false") {
+            String cookieVisitorId = (String) null
+            if (!isJustContent && !"false".equals(serverStatsNode.attribute('visitor-enabled'))) {
                 Cookie[] cookies = request.getCookies()
                 if (cookies != null) {
                     for (int i = 0; i < cookies.length; i++) {
@@ -169,7 +167,7 @@ class UserFacadeImpl implements UserFacade {
                 }
             }
 
-            if (serverStatsNode.attribute('visit-enabled') != "false") {
+            if (!isJustContent && !"false".equals(serverStatsNode.attribute('visit-enabled'))) {
                 // create and persist Visit
                 String contextPath = session.getServletContext().getContextPath()
                 String webappId = contextPath.length() > 1 ? contextPath.substring(1) : "ROOT"
@@ -182,7 +180,7 @@ class UserFacadeImpl implements UserFacade {
                         initialUserAgent:request.getHeader("User-Agent")?:"",
                         clientHostName:request.getRemoteHost(), clientUser:request.getRemoteUser()])
 
-                InetAddress address = eci.getEcfi().getLocalhostAddress()
+                InetAddress address = eci.ecfi.getLocalhostAddress()
                 parameters.serverIpAddress = address?.getHostAddress() ?: "127.0.0.1"
                 parameters.serverHostName = address?.getHostName() ?: "localhost"
 
@@ -214,7 +212,7 @@ class UserFacadeImpl implements UserFacade {
         Subject webSubject = makeEmptySubject()
         if (webSubject.authenticated) {
             // effectively login the user
-            pushUserSubject(webSubject, null)
+            pushUserSubject(webSubject)
             if (logger.traceEnabled) logger.trace("For new request found user [${username}] in the session")
         } else {
             if (logger.traceEnabled) logger.trace("For new request NO user authenticated in the session")
@@ -229,26 +227,22 @@ class UserFacadeImpl implements UserFacade {
             if (basicAuthAsString.indexOf(":") > 0) {
                 String username = basicAuthAsString.substring(0, basicAuthAsString.indexOf(":"))
                 String password = basicAuthAsString.substring(basicAuthAsString.indexOf(":") + 1)
-                String tenantId = parameters.authTenantId ? parameters.authTenantId.get(0) : null
-                this.loginUser(username, password, tenantId)
+                this.loginUser(username, password)
             } else {
                 logger.warn("For HTTP Basic Authorization got bad credentials string. Base64 encoded is [${basicAuthEncoded}] and after decoding is [${basicAuthAsString}].")
             }
         } else if (headers.api_key || headers.login_key) {
             String loginKey = headers.api_key ? headers.api_key.get(0) : (headers.login_key ? headers.login_key.get(0) : null)
-            String tenantId = headers.tenant_id ? headers.tenant_id.get(0) : null
-            if (loginKey) this.loginUserKey(loginKey.trim(), tenantId?.trim())
+            if (loginKey) this.loginUserKey(loginKey.trim())
         } else if (parameters.api_key || parameters.login_key) {
             String loginKey = parameters.api_key ? parameters.api_key.get(0) : (parameters.login_key ? parameters.login_key.get(0) : null)
-            String tenantId = parameters.tenant_id ? parameters.tenant_id.get(0) : null
-            if (loginKey) this.loginUserKey(loginKey.trim(), tenantId?.trim())
+            if (loginKey) this.loginUserKey(loginKey.trim())
         } else if (parameters.authUsername) {
             // try the Moqui-specific parameters for instant login
             // if we have credentials coming in anywhere other than URL parameters, try logging in
             String authUsername = parameters.authUsername.get(0)
             String authPassword = parameters.authPassword ? parameters.authPassword.get(0) : null
-            String authTenantId = parameters.authTenantId ? parameters.authTenantId.get(0) : null
-            this.loginUser(authUsername, authPassword, authTenantId)
+            this.loginUser(authUsername, authPassword)
         }
     }
     void initFromHttpSession(HttpSession session) {
@@ -256,7 +250,7 @@ class UserFacadeImpl implements UserFacade {
         Subject webSubject = makeEmptySubject()
         if (webSubject.authenticated) {
             // effectively login the user
-            pushUserSubject(webSubject, null)
+            pushUserSubject(webSubject)
             if (logger.traceEnabled) logger.trace("For new request found user [${username}] in the session")
         } else {
             if (logger.traceEnabled) logger.trace("For new request NO user authenticated in the session")
@@ -286,17 +280,10 @@ class UserFacadeImpl implements UserFacade {
     TimeZone getTimeZone() { return currentInfo.tzCache }
 
     Calendar getCalendarSafe() {
-        return Calendar.getInstance(currentInfo.tzCache ?: TimeZone.getDefault(),
-                currentInfo.localeCache ?: (request ? request.getLocale() : Locale.getDefault()))
+        return Calendar.getInstance(currentInfo.tzCache != null ? currentInfo.tzCache : TimeZone.getDefault(),
+                currentInfo.localeCache != null ? currentInfo.localeCache :
+                        (request != null ? request.getLocale() : Locale.getDefault()))
     }
-    MutableDateTime getDateTimeSafe(Long timeMillis) {
-        DateTimeZone dtz = DateTimeZone.forTimeZone(currentInfo.tzCache ?: TimeZone.getDefault())
-        long now
-        if (timeMillis != null) now = timeMillis
-        else now = ((Object) this.effectiveTime != null) ? this.effectiveTime.getTime() : System.currentTimeMillis()
-        return new MutableDateTime(now, dtz)
-    }
-
 
     @Override
     void setTimeZone(TimeZone tz) {
@@ -339,8 +326,7 @@ class UserFacadeImpl implements UserFacade {
     }
 
     String getPreference(String preferenceKey, String userId) {
-        EntityValue up = eci.getEntity().find("moqui.security.UserPreference").condition("userId", userId)
-                .condition("preferenceKey", preferenceKey).useCache(true).disableAuthz().one()
+        EntityValue up = eci.entityFacade.fastFindOne("moqui.security.UserPreference", true, true, userId, preferenceKey)
         if (up == null) {
             // try UserGroupPreference
             EntityList ugpList = eci.getEntity().find("moqui.security.UserGroupPreference")
@@ -400,11 +386,23 @@ class UserFacadeImpl implements UserFacade {
             fromCal.add(Calendar.WEEK_OF_YEAR, offset)
             thruCal = (Calendar) fromCal.clone()
             thruCal.add(Calendar.WEEK_OF_YEAR, 1)
+        } else if (period == "7d") {
+            fromCal.add(Calendar.DAY_OF_YEAR, offset * 7)
+            thruCal = (Calendar) fromCal.clone()
+            thruCal.add(Calendar.DAY_OF_YEAR, 7)
+            // have last 7d also include today (like 30d)
+            if (offset == -1) thruCal.add(Calendar.DAY_OF_YEAR, 1)
         } else if (period == "month") {
             fromCal.set(Calendar.DAY_OF_MONTH, fromCal.getActualMinimum(Calendar.DAY_OF_MONTH))
             fromCal.add(Calendar.MONTH, offset)
             thruCal = (Calendar) fromCal.clone()
             thruCal.add(Calendar.MONTH, 1)
+        } else if (period == "30d") {
+            fromCal.add(Calendar.DAY_OF_YEAR, offset * 30)
+            thruCal = (Calendar) fromCal.clone()
+            thruCal.add(Calendar.DAY_OF_YEAR, 30)
+            // have last 30d also include today to make it a more useful default
+            if (offset == -1) thruCal.add(Calendar.DAY_OF_YEAR, 1)
         } else if (period == "year") {
             fromCal.set(Calendar.DAY_OF_YEAR, fromCal.getActualMinimum(Calendar.DAY_OF_YEAR))
             fromCal.add(Calendar.YEAR, offset)
@@ -424,21 +422,14 @@ class UserFacadeImpl implements UserFacade {
     void setEffectiveTime(Timestamp effectiveTime) { this.effectiveTime = effectiveTime }
 
     @Override
-    boolean loginUser(String username, String password, String tenantId) {
-        if (!username) {
+    boolean loginUser(String username, String password) {
+        if (username == null || username.isEmpty()) {
             eci.message.addError(eci.l10n.localize("No username specified"))
             return false
         }
-        if (!password) {
+        if (password == null || password.isEmpty()) {
             eci.message.addError(eci.l10n.localize("No password specified"))
             return false
-        }
-        if (!tenantId) tenantId = eci.tenantId
-        if (tenantId && tenantId != eci.tenantId) {
-            eci.changeTenant(tenantId)
-            // DEJ 2016-05-26: better to keep the visitId, with this code it is always removed:
-            // this.visitId = null
-            // if (eci.web != null) eci.web.session.removeAttribute("moqui.visitId")
         }
 
         UsernamePasswordToken token = new UsernamePasswordToken(username, password)
@@ -449,7 +440,7 @@ class UserFacadeImpl implements UserFacade {
 
             // do this first so that the rest will be done as this user
             // just in case there is already a user authenticated push onto a stack to remember
-            pushUserSubject(loginSubject, tenantId)
+            pushUserSubject(loginSubject)
 
             // after successful login trigger the after-login actions
             if (eci.getWebImpl() != null) {
@@ -469,17 +460,10 @@ class UserFacadeImpl implements UserFacade {
     }
 
     /** For internal framework use only, does a login without authc. */
-    boolean internalLoginUser(String username, String tenantId) {
-        if (!username) {
+    boolean internalLoginUser(String username) {
+        if (username == null || username.isEmpty()) {
             eci.message.addError(eci.l10n.localize("No username specified"))
             return false
-        }
-        if (!tenantId) tenantId = eci.tenantId
-        if (tenantId && tenantId != eci.tenantId) {
-            eci.changeTenant(tenantId)
-            // DEJ 2016-05-26: better to keep the visitId, with this code it is always removed:
-            // this.visitId = null
-            // if (eci.web != null) eci.web.session.removeAttribute("moqui.visitId")
         }
 
         // since this doesn't go through the Shiro realm and do validations, do them now
@@ -493,17 +477,20 @@ class UserFacadeImpl implements UserFacade {
             // others to consider handling differently (these all inherit from AuthenticationException):
             //     UnknownAccountException, IncorrectCredentialsException, ExpiredCredentialsException,
             //     CredentialsException, LockedAccountException, DisabledAccountException, ExcessiveAttemptsException
-            eci.message.addError(ae.message)
+            eci.messageFacade.addError(ae.message)
             logger.warn("Login failure: ${eci.message.errorsString}", ae)
             return false
         }
 
         // do this first so that the rest will be done as this user
         // just in case there is already a user authenticated push onto a stack to remember
-        pushUser(username, tenantId)
+        pushUser(username)
 
         // after successful login trigger the after-login actions
-        if (eci.getWebImpl() != null) eci.getWebImpl().runAfterLoginActions()
+        if (eci.getWebImpl() != null) {
+            eci.getWebImpl().runAfterLoginActions()
+            eci.getWebImpl().getRequest().setAttribute("moqui.request.authenticated", "true")
+        }
 
         return true
     }
@@ -514,22 +501,14 @@ class UserFacadeImpl implements UserFacade {
         if (eci.getWebImpl() != null) eci.getWebImpl().runBeforeLogoutActions()
 
         popUser()
-
-        if (eci.web != null) {
-            eci.web.session.removeAttribute("moqui.tenantId")
-            // DEJ 2016-05-26: better to keep the visitId, with this code it is always removed:
-            // eci.web.session.removeAttribute("moqui.visitId")
-        }
     }
 
     @Override
-    boolean loginUserKey(String loginKey, String tenantId) {
+    boolean loginUserKey(String loginKey) {
         if (!loginKey) {
             eci.message.addError(eci.l10n.localize("No login key specified"))
             return false
         }
-        // if tenantId, change before lookup
-        if (tenantId) eci.changeTenant(tenantId)
 
         // lookup login key, by hashed key
         String hashedKey = eci.ecfi.getSimpleHash(loginKey, "", eci.ecfi.getLoginKeyHashType())
@@ -552,7 +531,7 @@ class UserFacadeImpl implements UserFacade {
         // login user with internalLoginUser()
         EntityValue userAccount = eci.getEntity().find("moqui.security.UserAccount")
                 .condition("userId", userLoginKey.userId).disableAuthz().one()
-        return internalLoginUser(userAccount.getString("username"), tenantId)
+        return internalLoginUser(userAccount.getString("username"))
     }
     @Override
     String getLoginKey() {
@@ -560,19 +539,16 @@ class UserFacadeImpl implements UserFacade {
         if (!userId) throw new IllegalStateException("No active user, cannot get login key")
 
         // generate login key
-        SecureRandom sr = new SecureRandom()
-        byte[] randomBytes = new byte[30]
-        sr.nextBytes(randomBytes)
-        String loginKey = Base64.encodeBase64URLSafeString(randomBytes)
+        String loginKey = StringUtilities.getRandomString(40)
 
         // save hashed in UserLoginKey, calc expire and set from/thru dates
         String hashedKey = eci.ecfi.getSimpleHash(loginKey, "", eci.ecfi.getLoginKeyHashType())
         int expireHours = eci.ecfi.getLoginKeyExpireHours()
         Timestamp fromDate = getNowTimestamp()
         long thruTime = fromDate.getTime() + (expireHours * 60*60*1000)
-        eci.service.sync().name("create", "moqui.security.UserLoginKey")
+        eci.serviceFacade.sync().name("create", "moqui.security.UserLoginKey")
                 .parameters([loginKey:hashedKey, userId:userId, fromDate:fromDate, thruDate:new Timestamp(thruTime)])
-                .disableAuthz().call()
+                .disableAuthz().requireNewTransaction(true).call()
 
         // clean out expired keys
         eci.entity.find("moqui.security.UserLoginKey").condition("userId", userId)
@@ -597,8 +573,8 @@ class UserFacadeImpl implements UserFacade {
     boolean hasPermission(String userPermissionId) { return hasPermissionById(getUserId(), userPermissionId, getNowTimestamp(), eci) }
 
     static boolean hasPermission(String username, String userPermissionId, Timestamp whenTimestamp, ExecutionContextImpl eci) {
-        EntityValue ua = eci.getEntity().find("moqui.security.UserAccount").condition("userId", username).useCache(true).disableAuthz().one()
-        if (ua == null) ua = eci.getEntity().find("moqui.security.UserAccount").condition("username", username).useCache(true).disableAuthz().one()
+        EntityValue ua = eci.entityFacade.fastFindOne("moqui.security.UserAccount", true, true, username)
+        if (ua == null) ua = eci.entityFacade.find("moqui.security.UserAccount").condition("username", username).useCache(true).disableAuthz().one()
         if (ua == null) return false
         hasPermissionById((String) ua.userId, userPermissionId, whenTimestamp, eci)
     }
@@ -615,8 +591,8 @@ class UserFacadeImpl implements UserFacade {
     boolean isInGroup(String userGroupId) { return isInGroup(getUserId(), userGroupId, getNowTimestamp(), eci) }
 
     static boolean isInGroup(String username, String userGroupId, Timestamp whenTimestamp, ExecutionContextImpl eci) {
-        EntityValue ua = eci.getEntity().find("moqui.security.UserAccount").condition("userId", username).useCache(true).disableAuthz().one()
-        if (ua == null) ua = eci.getEntity().find("moqui.security.UserAccount").condition("username", username).useCache(true).disableAuthz().one()
+        EntityValue ua = eci.entityFacade.fastFindOne("moqui.security.UserAccount", true, true, username)
+        if (ua == null) ua = eci.entityFacade.find("moqui.security.UserAccount").condition("username", username).useCache(true).disableAuthz().one()
         return isInGroupById((String) ua?.userId, userGroupId, whenTimestamp, eci)
     }
     static boolean isInGroupById(String userId, String userGroupId, Timestamp whenTimestamp, ExecutionContextImpl eci) {
@@ -646,33 +622,33 @@ class UserFacadeImpl implements UserFacade {
         return groupIdSet
     }
 
-    ArrayList<Map<String, Object>> getArtifactTarpitCheckList(String artifactTypeEnumId) {
-        ArrayList<Map<String, Object>> checkList = (ArrayList<Map<String, Object>>) currentInfo.internalArtifactTarpitCheckListMap.get(artifactTypeEnumId)
+    ArrayList<Map<String, Object>> getArtifactTarpitCheckList(ArtifactExecutionInfo.ArtifactType artifactTypeEnum) {
+        ArrayList<Map<String, Object>> checkList = (ArrayList<Map<String, Object>>) currentInfo.internalArtifactTarpitCheckListMap.get(artifactTypeEnum)
         if (checkList == null) {
             // get the list for each group separately to increase cache hits/efficiency
             checkList = new ArrayList<>()
             for (String userGroupId in getUserGroupIdSet()) {
                 EntityList atcvList = eci.getEntity().find("moqui.security.ArtifactTarpitCheckView")
-                        .condition("userGroupId", userGroupId).condition("artifactTypeEnumId", artifactTypeEnumId)
+                        .condition("userGroupId", userGroupId).condition("artifactTypeEnumId", artifactTypeEnum.name())
                         .useCache(true).disableAuthz().list()
                 int atcvListSize = atcvList.size()
                 for (int i = 0; i < atcvListSize; i++) checkList.add(((EntityValueBase) atcvList.get(i)).getValueMap())
             }
-            currentInfo.internalArtifactTarpitCheckListMap.put(artifactTypeEnumId, checkList)
+            currentInfo.internalArtifactTarpitCheckListMap.put(artifactTypeEnum, checkList)
         }
         return checkList
     }
 
-    ArrayList<Map<String, Object>> getArtifactAuthzCheckList() {
+    ArrayList<ArtifactAuthzCheck> getArtifactAuthzCheckList() {
         // NOTE: even if there is no user, still consider part of the ALL_USERS group and such: if (usernameStack.size() == 0) return EntityListImpl.EMPTY
         if (currentInfo.internalArtifactAuthzCheckList == null) {
             // get the list for each group separately to increase cache hits/efficiency
-            ArrayList<Map<String, Object>> newList = new ArrayList<>()
+            ArrayList<ArtifactAuthzCheck> newList = new ArrayList<>()
             for (String userGroupId in getUserGroupIdSet()) {
                 EntityList aacvList = eci.getEntity().find("moqui.security.ArtifactAuthzCheckView")
                         .condition("userGroupId", userGroupId).useCache(true).disableAuthz().list()
                 int aacvListSize = aacvList.size()
-                for (int i = 0; i < aacvListSize; i++) newList.add(((EntityValueBase) aacvList.get(i)).getValueMap())
+                for (int i = 0; i < aacvListSize; i++) newList.add(new ArtifactAuthzCheck((EntityValueBase) aacvList.get(i)))
             }
             currentInfo.internalArtifactAuthzCheckList = newList
         }
@@ -696,30 +672,29 @@ class UserFacadeImpl implements UserFacade {
 
     @Override
     EntityValue getVisit() {
-        if (!visitId) return null
-        EntityValue vst = eci.getEntity().find("moqui.server.Visit").condition("visitId", visitId).useCache(true).disableAuthz().one()
-        return vst
+        if (visitId == null || visitId.isEmpty()) return null
+        return eci.entityFacade.fastFindOne("moqui.server.Visit", true, true, visitId)
     }
 
     // ========== UserInfo ==========
 
-    UserInfo pushUserSubject(Subject subject, String tenantId) {
-        UserInfo userInfo = pushUser((String) subject.getPrincipal(), tenantId)
+    UserInfo pushUserSubject(Subject subject) {
+        UserInfo userInfo = pushUser((String) subject.getPrincipal())
         userInfo.subject = subject
         return userInfo
     }
-    UserInfo pushUser(String username, String tenantId) {
-        if (currentInfo != null && currentInfo.username == username && currentInfo.tenantId == tenantId)
+    UserInfo pushUser(String username) {
+        if (currentInfo != null && currentInfo.username == username)
             return currentInfo
 
         if (currentInfo == null || currentInfo.isPopulated()) {
-            // logger.info("Pushing UserInfo for ${username}:${tenantId} to stack, was ${currentInfo.username}:${currentInfo.tenantId}")
-            UserInfo userInfo = new UserInfo(this, username, tenantId)
+            // logger.info("Pushing UserInfo for ${username} to stack, was ${currentInfo.username}")
+            UserInfo userInfo = new UserInfo(this, username)
             userInfoStack.addFirst(userInfo)
             currentInfo = userInfo
             return userInfo
         } else {
-            currentInfo.setInfo(username, tenantId)
+            currentInfo.setInfo(username)
             return currentInfo
         }
     }
@@ -728,43 +703,26 @@ class UserFacadeImpl implements UserFacade {
         userInfoStack.removeFirst()
 
         // always leave at least an empty UserInfo on the stack
-        if (userInfoStack.size() == 0) userInfoStack.addFirst(new UserInfo(this, null, null))
+        if (userInfoStack.size() == 0) userInfoStack.addFirst(new UserInfo(this, null))
 
         UserInfo newCurInfo = userInfoStack.getFirst()
-        // logger.info("Popping UserInfo ${currentInfo.username}:${currentInfo.tenantId}, new current is ${newCurInfo.username}:${newCurInfo.tenantId}")
+        // logger.info("Popping UserInfo ${currentInfo.username}, new current is ${newCurInfo.username}")
 
         // whether previous user on stack or new one, set the currentInfo
         currentInfo = newCurInfo
     }
 
-    /** Called by ExecutionContextInfo when tenant pushed (changeTenant()) */
-    void pushTenant(String toTenantId) {
-        UserInfo wasInfo = currentInfo
-        // if there is a previous user populated and it is not in the toTenantId tenant, push an empty UserInfo
-        if (currentInfo.tenantId != toTenantId) pushUser(null, toTenantId)
-
-        // logger.info("UserFacade pushed tenant: from ${wasInfo.tenantId} to ${currentInfo.tenantId}, user was ${wasInfo.username} and is ${currentInfo.username}")
-    }
-    /** Called by ExecutionContextInfo when tenant popped (popTenant()) */
-    void popTenant(String fromTenantId) {
-        UserInfo wasInfo = currentInfo
-        // pop current user (if populated effectively logs out, if not will get an empty user in current tenant, already set in eci)
-        if (currentInfo.tenantId == fromTenantId) popUser()
-
-        // logger.info("UserFacade popped tenant: ${wasInfo.tenantId} to ${currentInfo.tenantId}, user was ${wasInfo.username} and is ${currentInfo.username}")
-    }
-
     static class UserInfo {
-        UserFacadeImpl ufi
+        final UserFacadeImpl ufi
         // keep a reference to a UserAccount for performance reasons, avoid repeated cached queries
         protected EntityValueBase userAccount = (EntityValueBase) null
-        protected String tenantId = (String) null
         protected String username = (String) null
         protected String userId = (String) null
         Set<String> internalUserGroupIdSet = (Set<String>) null
         // these two are used by ArtifactExecutionFacadeImpl but are maintained here to be cleared when user changes, are based on current user's groups
-        Map<String, ArrayList<Map<String, Object>>> internalArtifactTarpitCheckListMap = new HashMap<>()
-        ArrayList<Map<String, Object>> internalArtifactAuthzCheckList = (ArrayList<Map<String, Object>>) null
+        final EnumMap<ArtifactExecutionInfo.ArtifactType, ArrayList<Map<String, Object>>> internalArtifactTarpitCheckListMap =
+                new EnumMap<>(ArtifactExecutionInfo.ArtifactType.class)
+        ArrayList<ArtifactAuthzCheck> internalArtifactAuthzCheckList = (ArrayList<ArtifactAuthzCheck>) null
 
         Locale localeCache = (Locale) null
         TimeZone tzCache = (TimeZone) null
@@ -777,19 +735,18 @@ class UserFacadeImpl implements UserFacade {
 
         protected Map<String, Object> userContext = (Map<String, Object>) null
 
-        UserInfo(UserFacadeImpl ufi, String username, String tenantId) {
+        UserInfo(UserFacadeImpl ufi, String username) {
             this.ufi = ufi
-            setInfo(username, tenantId)
+            setInfo(username)
         }
 
         boolean isPopulated() { return (username != null && username.length() > 0) || loggedInAnonymous }
 
-        void setInfo(String username, String tenantId) {
+        void setInfo(String username) {
             // this shouldn't happen unless there is a bug in the framework
             if (isPopulated()) throw new IllegalStateException("Cannot set user info, UserInfo already populated")
 
             this.username = username
-            this.tenantId = tenantId ?: ufi.eci.tenantId
 
             EntityValueBase ua = (EntityValueBase) null
             if (username != null && username.length() > 0) {
@@ -822,7 +779,7 @@ class UserFacadeImpl implements UserFacade {
 
             internalUserGroupIdSet = (Set<String>) null
             internalArtifactTarpitCheckListMap.clear()
-            internalArtifactAuthzCheckList = (ArrayList<Map<String, Object>>) null
+            internalArtifactAuthzCheckList = (ArrayList<ArtifactAuthzCheck>) null
         }
 
         String getUsername() { return username }

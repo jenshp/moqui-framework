@@ -15,7 +15,7 @@ package org.moqui.impl.webapp
 
 import groovy.transform.CompileStatic
 import org.moqui.context.ArtifactTarpitException
-import org.moqui.impl.StupidUtilities
+import org.moqui.util.StringUtilities
 
 import javax.servlet.ServletException
 import javax.servlet.http.HttpServlet
@@ -51,6 +51,11 @@ class MoquiFopServlet extends HttpServlet {
                 (ExecutionContextFactoryImpl) getServletContext().getAttribute("executionContextFactory")
         String moquiWebappName = getServletContext().getInitParameter("moqui-name")
 
+        if (ecfi == null || moquiWebappName == null) {
+            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "System is initializing, try again soon.")
+            return
+        }
+
         String pathInfo = request.getPathInfo()
         long startTime = System.currentTimeMillis()
 
@@ -69,13 +74,13 @@ class MoquiFopServlet extends HttpServlet {
             xslFoText = sr.render()
 
             // logger.warn("======== XSL-FO content:\n${xslFoText}")
-            if (logger.traceEnabled) logger.trace("FOP XSL-FO content:\n${xslFoText}")
+            if (logger.traceEnabled) logger.trace("XSL-FO content:\n${xslFoText}")
 
             String contentType = ec.web.requestParameters."contentType" ?: "application/pdf"
             response.setContentType(contentType)
 
             if (filename) {
-                String utfFilename = StupidUtilities.encodeAsciiFilename(filename)
+                String utfFilename = StringUtilities.encodeAsciiFilename(filename)
                 response.addHeader("Content-Disposition", "attachment; filename=\"${filename}\"; filename*=utf-8''${utfFilename}")
             } else {
                 response.addHeader("Content-Disposition", "inline")
@@ -116,6 +121,6 @@ class MoquiFopServlet extends HttpServlet {
             ec.destroy()
         }
 
-        if (logger.infoEnabled) logger.info("Finished FOP request to [${pathInfo}] of content type [${response.getContentType()}] in [${(System.currentTimeMillis()-startTime)/1000}] seconds in session [${request.session.id}] thread [${Thread.currentThread().id}:${Thread.currentThread().name}]")
+        if (logger.infoEnabled) logger.info("Finished XSL-FO request to ${pathInfo}, content type ${response.getContentType()} in ${System.currentTimeMillis()-startTime}ms; session ${request.session.id} thread ${Thread.currentThread().id}:${Thread.currentThread().name}")
     }
 }

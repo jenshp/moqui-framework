@@ -33,7 +33,6 @@ import java.sql.Timestamp
 class NotificationMessageImpl implements NotificationMessage, Externalizable {
     private final static Logger logger = LoggerFactory.getLogger(NotificationMessageImpl.class)
 
-    private String tenantId = (String) null
     private Set<String> userIdSet = new HashSet()
     private String userGroupId = (String) null
     private String topic = (String) null
@@ -56,23 +55,17 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
 
     /** Default constructor for deserialization */
     NotificationMessageImpl() { }
-    NotificationMessageImpl(ExecutionContextFactoryImpl ecfi, String tenantId) {
-        ecfiTransient = ecfi
-        this.tenantId = tenantId
-    }
+    NotificationMessageImpl(ExecutionContextFactoryImpl ecfi) { ecfiTransient = ecfi }
 
     ExecutionContextFactoryImpl getEcfi() {
         if (ecfiTransient == null) ecfiTransient = (ExecutionContextFactoryImpl) Moqui.getExecutionContextFactory()
         return ecfiTransient
     }
     EntityValue getNotificationTopic() {
-        if (notificationTopic == null && topic) notificationTopic = ecfi.getEntityFacade(tenantId)
-                .find("moqui.security.user.NotificationTopic").condition("topic", topic).useCache(true).disableAuthz().one()
+        if (notificationTopic == null && topic != null && !topic.isEmpty())
+            notificationTopic = ecfi.entityFacade.fastFindOne("moqui.security.user.NotificationTopic", true, true, topic)
         return notificationTopic
     }
-
-    @Override
-    String getTenantId() { tenantId }
 
     @Override
     NotificationMessage userId(String userId) { userIdSet.add(userId); return this }
@@ -90,7 +83,7 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
     Set<String> getNotifyUserIds() {
         Set<String> notifyUserIds = new HashSet<>()
         Set<String> checkedUserIds = new HashSet<>()
-        EntityFacade ef = ecfi.getEntity(tenantId)
+        EntityFacade ef = ecfi.entityFacade
 
         for (String userId in userIdSet) {
             checkedUserIds.add(userId)
@@ -109,6 +102,15 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
                 checkedUserIds.add(userId)
                 if (checkUserNotify(userId, ef)) notifyUserIds.add(userId)
             }
+        }
+
+        // add all users subscribed to all messages on the topic
+        EntityList allNotificationUsers = ef.find("moqui.security.user.NotificationTopicUser")
+                .condition("topic", topic).condition("allNotifications", "Y").useCache(true).disableAuthz().list()
+        int allNotificationUsersSize = allNotificationUsers.size()
+        for (int i = 0; i < allNotificationUsersSize; i++) {
+            EntityValue allNotificationUser = (EntityValue) allNotificationUsers.get(i)
+            notifyUserIds.add((String) allNotificationUser.userId)
         }
 
         return notifyUserIds
@@ -255,8 +257,10 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
                                      messageJson:nmi.getMessageJson(), titleText:nmi.getTitle(), linkText:nmi.getLink(),
                                      typeString:nmi.getType(), showAlert:(nmi.showAlert ? 'Y' : 'N')])
                         .disableAuthz().call()
-                nmi.setNotificationMessageId((String) createResult.notificationMessageId)
+                // if it's null we got an error
+                if (createResult == null) return
 
+                nmi.setNotificationMessageId((String) createResult.notificationMessageId)
                 for (String userId in nmi.getNotifyUserIds())
                     ecfi.service.sync().name("create", "moqui.security.user.NotificationMessageUser")
                             .parameters([notificationMessageId:createResult.notificationMessageId, userId:userId])
@@ -283,7 +287,7 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
         ExecutionContextImpl eci = ecfi.getEci()
         boolean alreadyDisabled = eci.getArtifactExecution().disableAuthz()
         try {
-            ecfi.getEntityFacade(tenantId).makeValue("moqui.security.user.NotificationMessageUser")
+            ecfi.entityFacade.makeValue("moqui.security.user.NotificationMessageUser")
                     .set("userId", userId).set("notificationMessageId", notificationMessageId)
                     .set("sentDate", new Timestamp(System.currentTimeMillis())).update()
         } catch (Throwable t) {
@@ -307,7 +311,7 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
         boolean alreadyDisabled = ec.getArtifactExecution().disableAuthz()
         try {
             Timestamp recStamp = new Timestamp(System.currentTimeMillis())
-            ec.factory.getEntity(ec.tenantId).makeValue("moqui.security.user.NotificationMessageUser")
+            ec.factory.entity.makeValue("moqui.security.user.NotificationMessageUser")
                     .set("userId", userId).set("notificationMessageId", notificationMessageId)
                     .set("viewedDate", recStamp).update()
             return recStamp
@@ -344,7 +348,6 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
     @Override
     void writeExternal(ObjectOutput out) throws IOException {
         // NOTE: lots of writeObject because values are nullable
-        out.writeUTF(tenantId)
         out.writeObject(userIdSet)
         out.writeObject(userGroupId)
         out.writeUTF(topic)
@@ -360,7 +363,6 @@ class NotificationMessageImpl implements NotificationMessage, Externalizable {
 
     @Override
     void readExternal(ObjectInput objectInput) throws IOException, ClassNotFoundException {
-        tenantId = objectInput.readUTF()
         userIdSet = (Set<String>) objectInput.readObject()
         userGroupId = (String) objectInput.readObject()
         topic = objectInput.readUTF()

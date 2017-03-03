@@ -15,9 +15,6 @@ package org.moqui.impl.entity
 
 import groovy.json.JsonOutput
 import groovy.transform.CompileStatic
-import org.elasticsearch.action.admin.indices.create.CreateIndexRequestBuilder
-import org.elasticsearch.action.admin.indices.exists.indices.IndicesExistsRequest
-import org.elasticsearch.client.Client
 import org.moqui.entity.EntityCondition
 import org.moqui.entity.EntityDynamicView
 import org.moqui.entity.EntityException
@@ -25,16 +22,17 @@ import org.moqui.entity.EntityFind
 import org.moqui.entity.EntityList
 import org.moqui.entity.EntityListIterator
 import org.moqui.entity.EntityValue
-import org.moqui.impl.StupidUtilities
 import org.moqui.impl.context.ExecutionContextImpl
 import org.moqui.impl.entity.condition.ConditionAlias
 import org.moqui.impl.entity.condition.ConditionField
 import org.moqui.impl.entity.condition.FieldValueCondition
+import org.moqui.util.CollectionUtilities
 import org.moqui.util.MNode
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 import java.sql.Timestamp
+import java.util.concurrent.atomic.AtomicInteger
 
 @CompileStatic
 class EntityDataDocument {
@@ -52,7 +50,7 @@ class EntityDataDocument {
                              Timestamp fromUpdateStamp, Timestamp thruUpdatedStamp, boolean prettyPrint) {
         File outFile = new File(filename)
         if (!outFile.createNewFile()) {
-            efi.ecfi.executionContext.message.addError(efi.ecfi.resource.expand('File ${filename} already exists.','',[filename:filename]))
+            efi.ecfi.getEci().message.addError(efi.ecfi.resource.expand('File ${filename} already exists.','',[filename:filename]))
             return 0
         }
 
@@ -64,7 +62,7 @@ class EntityDataDocument {
 
         pw.write("{}\n]\n")
         pw.close()
-        efi.ecfi.executionContext.message.addMessage(efi.ecfi.resource.expand('Wrote ${valuesWritten} documents to file ${filename}','',[valuesWritten:valuesWritten,filename:filename]))
+        efi.ecfi.getEci().message.addMessage(efi.ecfi.resource.expand('Wrote ${valuesWritten} documents to file ${filename}','',[valuesWritten:valuesWritten,filename:filename]))
         return valuesWritten
     }
 
@@ -73,7 +71,7 @@ class EntityDataDocument {
         File outDir = new File(dirname)
         if (!outDir.exists()) outDir.mkdir()
         if (!outDir.isDirectory()) {
-            efi.ecfi.executionContext.message.addError(efi.ecfi.resource.expand('Path ${dirname} is not a directory.','',[dirname:dirname]))
+            efi.ecfi.getEci().message.addError(efi.ecfi.resource.expand('Path ${dirname} is not a directory.','',[dirname:dirname]))
             return 0
         }
 
@@ -83,7 +81,7 @@ class EntityDataDocument {
             String filename = "${dirname}/${dataDocumentId}.json"
             File outFile = new File(filename)
             if (outFile.exists()) {
-                efi.ecfi.executionContext.message.addError(efi.ecfi.resource.expand('File ${filename} already exists, skipping document ${dataDocumentId}.','',[filename:filename,dataDocumentId:dataDocumentId]))
+                efi.ecfi.getEci().message.addError(efi.ecfi.resource.expand('File ${filename} already exists, skipping document ${dataDocumentId}.','',[filename:filename,dataDocumentId:dataDocumentId]))
                 continue
             }
             outFile.createNewFile()
@@ -95,7 +93,7 @@ class EntityDataDocument {
 
             pw.write("{}\n]\n")
             pw.close()
-            efi.ecfi.executionContext.message.addMessage(efi.ecfi.resource.expand('Wrote ${valuesWritten} records to file ${filename}','',[valuesWritten:valuesWritten, filename:filename]))
+            efi.ecfi.getEci().message.addMessage(efi.ecfi.resource.expand('Wrote ${valuesWritten} records to file ${filename}','',[valuesWritten:valuesWritten, filename:filename]))
         }
 
         return valuesWritten
@@ -122,12 +120,11 @@ class EntityDataDocument {
         return valuesWritten
     }
 
-    List<Map> getDataDocuments(String dataDocumentId, EntityCondition condition, Timestamp fromUpdateStamp,
+    ArrayList<Map> getDataDocuments(String dataDocumentId, EntityCondition condition, Timestamp fromUpdateStamp,
                                Timestamp thruUpdatedStamp) {
-        ExecutionContextImpl eci = efi.getEcfi().getEci()
+        ExecutionContextImpl eci = efi.ecfi.getEci()
 
-        EntityValue dataDocument = efi.find("moqui.entity.document.DataDocument")
-                .condition("dataDocumentId", dataDocumentId).useCache(true).one()
+        EntityValue dataDocument = efi.fastFindOne("moqui.entity.document.DataDocument", true, false, dataDocumentId)
         if (dataDocument == null) throw new EntityException("No DataDocument found with ID [${dataDocumentId}]")
         EntityList dataDocumentFieldList = dataDocument.findRelated("moqui.entity.document.DataDocumentField", null, null, true, false)
         EntityList dataDocumentRelAliasList = dataDocument.findRelated("moqui.entity.document.DataDocumentRelAlias", null, null, true, false)
@@ -156,7 +153,7 @@ class EntityDataDocument {
         // add member entities and field aliases to dynamic view
         dynamicView.addMemberEntity("PRIM_ENT", primaryEntityName, null, null, null)
         fieldTree.put("_ALIAS", "PRIM_ENT")
-        StupidUtilities.Incrementer incrementer = new StupidUtilities.Incrementer()
+        AtomicInteger incrementer = new AtomicInteger()
         addDataDocRelatedEntity(dynamicView, "PRIM_ENT", fieldTree, incrementer)
 
         // logger.warn("=========== ${dataDocumentId} ViewEntityNode=${((EntityDynamicViewImpl) dynamicView).getViewEntityNode()}")
@@ -201,18 +198,19 @@ class EntityDataDocument {
         EntityListIterator mainEli = mainFind.iterator()
         Map<String, Map<String, Object>> documentMapMap = [:]
         try {
-            for (EntityValue ev in mainEli) {
+            EntityValue ev
+            while ((ev = (EntityValue) mainEli.next()) != null) {
                 // logger.warn("=========== DataDocument query result for ${dataDocumentId}: ${ev}")
 
                 StringBuffer pkCombinedSb = new StringBuffer()
                 for (String pkFieldName in primaryPkFieldNames) {
                     if (pkCombinedSb.length() > 0) pkCombinedSb.append("::")
-                    pkCombinedSb.append(ev.getString(pkFieldName))
+                    pkCombinedSb.append((String) ev.getNoCheckSimple(pkFieldName))
                 }
                 String docId = pkCombinedSb.toString()
 
                 /*
-                  - _index = tenantId + "__" + DataDocument.indexName
+                  - _index = DataDocument.indexName
                   - _type = dataDocumentId
                   - _id = pk field values from primary entity, double colon separated
                   - _timestamp = document created time
@@ -223,19 +221,19 @@ class EntityDataDocument {
                 if (docMap == null) {
                     // add special entries
                     docMap = [_type:dataDocumentId, _id:docId] as Map<String, Object>
-                    docMap.put('_timestamp', eci.getL10nFacade().format(
+                    docMap.put('_timestamp', eci.l10nFacade.format(
                             thruUpdatedStamp ?: new Timestamp(System.currentTimeMillis()), "yyyy-MM-dd'T'HH:mm:ssZ"))
-                    String _index = eci.getTenantId()
-                    if (dataDocument.indexName) _index = _index + "__" + dataDocument.indexName
+                    String _index = dataDocument.indexName
                     docMap.put('_index', _index.toLowerCase())
-                    docMap.put('_entity', primaryEd.getShortAlias() ?: primaryEd.getFullEntityName())
+                    docMap.put('_entity', primaryEd.getShortOrFullEntityName())
 
                     // add Map for primary entity
                     Map primaryEntityMap = [:]
                     for (Map.Entry fieldTreeEntry in fieldTree.entrySet()) {
-                        if (fieldTreeEntry.getValue() instanceof String) {
+                        Object entryValue = fieldTreeEntry.getValue()
+                        if (entryValue instanceof String) {
                             if (fieldTreeEntry.getKey() == "_ALIAS") continue
-                            String fieldName = fieldTreeEntry.getValue()
+                            String fieldName = (String) entryValue
                             Object value = ev.get(fieldName)
                             if (value) primaryEntityMap.put(fieldName, value)
                         }
@@ -254,12 +252,12 @@ class EntityDataDocument {
         }
 
         // make the actual list and return it
-        List<Map> documentMapList = []
+        ArrayList<Map> documentMapList = new ArrayList<>(documentMapMap.size())
         for (Map.Entry<String, Map> documentMapEntry in documentMapMap.entrySet()) {
             Map docMap = documentMapEntry.getValue()
             // call the manualDataServiceName service for each document
             if (dataDocument.manualDataServiceName) {
-                Map result = efi.ecfi.getServiceFacade().sync().name((String) dataDocument.manualDataServiceName)
+                Map result = efi.ecfi.serviceFacade.sync().name((String) dataDocument.manualDataServiceName)
                         .parameters([dataDocumentId:dataDocumentId, document:docMap]).call()
                 if (result.document) docMap = (Map) result.document
             }
@@ -268,7 +266,7 @@ class EntityDataDocument {
             boolean allPassed = true
             for (EntityValue dataDocumentCondition in dataDocumentConditionList) if (dataDocumentCondition.postQuery == "Y") {
                 Set<Object> valueSet = new HashSet<Object>()
-                StupidUtilities.findAllFieldsNestedMap((String) dataDocumentCondition.fieldNameAlias, docMap, valueSet)
+                CollectionUtilities.findAllFieldsNestedMap((String) dataDocumentCondition.fieldNameAlias, docMap, valueSet)
                 if (!valueSet) {
                     if (!dataDocumentCondition.fieldValue) { continue }
                     else { allPassed = false; break }
@@ -316,7 +314,7 @@ class EntityDataDocument {
                 String relationshipName = fieldTreeEntry.getKey()
                 Map fieldTreeChild = (Map) fieldTreeEntry.getValue()
 
-                EntityDefinition.RelationshipInfo relationshipInfo = parentEd.getRelationshipInfo(relationshipName)
+                EntityJavaUtil.RelationshipInfo relationshipInfo = parentEd.getRelationshipInfo(relationshipName)
                 String relDocumentAlias = relationshipAliasMap.get(relationshipName) ?: relationshipInfo.shortAlias ?: relationshipName
                 EntityDefinition relatedEd = relationshipInfo.relatedEd
                 boolean isOneRelationship = relationshipInfo.isTypeOne
@@ -391,7 +389,7 @@ class EntityDataDocument {
     }
 
     protected void addDataDocRelatedEntity(EntityDynamicView dynamicView, String parentEntityAlias,
-                                           Map fieldTreeCurrent, StupidUtilities.Incrementer incrementer) {
+                                           Map fieldTreeCurrent, AtomicInteger incrementer) {
         for (Map.Entry fieldTreeEntry in fieldTreeCurrent.entrySet()) {
             if (fieldTreeEntry.getKey() instanceof String && fieldTreeEntry.getKey() == "_ALIAS") continue
             if (fieldTreeEntry.getValue() instanceof Map) {
@@ -408,141 +406,5 @@ class EntityDataDocument {
                 dynamicView.addAlias(entityAlias, (String) fieldTreeEntry.getValue(), (String) fieldTreeEntry.getKey(), null)
             }
         }
-    }
-
-    void checkCreateIndex(String indexName) {
-        String baseIndexName = indexName.contains("__") ? indexName.substring(indexName.indexOf("__") + 2) : indexName
-
-        Client client = efi.getEcfi().getTool("ElasticSearch", Client.class)
-        boolean hasIndex = client.admin().indices().exists(new IndicesExistsRequest(indexName)).actionGet().exists
-        // logger.warn("========== Checking index ${indexName} (${baseIndexName}), hasIndex=${hasIndex}")
-        if (hasIndex) return
-
-        logger.info("Creating ElasticSearch index ${indexName} (${baseIndexName}) and adding document mappings")
-
-        CreateIndexRequestBuilder cirb = client.admin().indices().prepareCreate(indexName)
-
-        EntityList ddList = efi.find("moqui.entity.document.DataDocument").condition("indexName", baseIndexName).list()
-        for (EntityValue dd in ddList) {
-            Map docMapping = makeElasticSearchMapping((String) dd.dataDocumentId)
-            cirb.addMapping((String) dd.dataDocumentId, docMapping)
-            // logger.warn("========== Added mapping for ${dd.dataDocumentId} to index ${indexName}:\n${docMapping}")
-
-        }
-        cirb.execute().actionGet()
-    }
-
-    void putIndexMappings(String indexName) {
-        String baseIndexName = indexName.contains("__") ? indexName.substring(indexName.indexOf("__") + 2) : indexName
-
-        Client client = efi.getEcfi().getTool("ElasticSearch", Client.class)
-        boolean hasIndex = client.admin().indices().exists(new IndicesExistsRequest(indexName)).actionGet().isExists()
-        if (!hasIndex) {
-            client.admin().indices().prepareCreate(indexName).execute().actionGet()
-        }
-
-        EntityList ddList = efi.find("moqui.entity.document.DataDocument").condition("indexName", baseIndexName).list()
-        for (EntityValue dd in ddList) {
-            Map docMapping = makeElasticSearchMapping((String) dd.dataDocumentId)
-            client.admin().indices().preparePutMapping(indexName).setType((String) dd.dataDocumentId)
-                    .setSource(docMapping).execute().actionGet() // .setIgnoreConflicts(true) no longer supported?
-        }
-    }
-
-    static final Map<String, String> esTypeMap = [id:'string', 'id-long':'string', date:'date', time:'string',
-        'date-time':'date', 'number-integer':'long', 'number-decimal':'double', 'number-float':'double',
-        'currency-amount':'double', 'currency-precise':'double', 'text-indicator':'string', 'text-short':'string',
-        'text-medium':'string', 'text-long':'string', 'text-very-long':'string', 'binary-very-long':'binary']
-
-    Map makeElasticSearchMapping(String dataDocumentId) {
-        EntityValue dataDocument = efi.find("moqui.entity.document.DataDocument")
-                .condition("dataDocumentId", dataDocumentId).useCache(true).one()
-        if (dataDocument == null) throw new EntityException("No DataDocument found with ID [${dataDocumentId}]")
-        EntityList dataDocumentFieldList = dataDocument.findRelated("moqui.entity.document.DataDocumentField", null, null, true, false)
-        EntityList dataDocumentRelAliasList = dataDocument.findRelated("moqui.entity.document.DataDocumentRelAlias", null, null, true, false)
-
-        Map<String, String> relationshipAliasMap = [:]
-        for (EntityValue dataDocumentRelAlias in dataDocumentRelAliasList)
-            relationshipAliasMap.put((String) dataDocumentRelAlias.relationshipName, (String) dataDocumentRelAlias.documentAlias)
-
-        String primaryEntityName = dataDocument.primaryEntityName
-        // String primaryEntityAlias = relationshipAliasMap.get(primaryEntityName) ?: primaryEntityName
-        EntityDefinition primaryEd = efi.getEntityDefinition(primaryEntityName)
-
-        Map<String, Object> rootProperties = [_entity:[type:'string', index:'not_analyzed']] as Map<String, Object>
-        Map<String, Object> mappingMap = [properties:rootProperties] as Map<String, Object>
-
-        List<String> remainingPkFields = new ArrayList(primaryEd.getPkFieldNames())
-        for (EntityValue dataDocumentField in dataDocumentFieldList) {
-            String fieldPath = dataDocumentField.fieldPath
-            if (!fieldPath.contains(':')) {
-                // is a field on the primary entity, put it there
-                String fieldName = dataDocumentField.fieldNameAlias ?: dataDocumentField.fieldPath
-                EntityJavaUtil.FieldInfo fieldInfo = primaryEd.getFieldInfo((String) dataDocumentField.fieldPath)
-                if (fieldInfo == null) throw new EntityException("Could not find field [${dataDocumentField.fieldPath}] for entity [${primaryEd.getFullEntityName()}] in DataDocument [${dataDocumentId}]")
-
-                String fieldType = fieldInfo.type
-                String mappingType = esTypeMap.get(fieldType) ?: 'string'
-                Map propertyMap = [type:mappingType]
-                if (fieldType.startsWith("id")) propertyMap.index = 'not_analyzed'
-                rootProperties.put(fieldName, propertyMap)
-
-                if (remainingPkFields.contains(dataDocumentField.fieldPath)) remainingPkFields.remove((String) dataDocumentField.fieldPath)
-                continue
-            }
-
-            Iterator<String> fieldPathElementIter = fieldPath.split(":").iterator()
-            Map<String, Object> currentProperties = rootProperties
-            EntityDefinition currentEd = primaryEd
-            while (fieldPathElementIter.hasNext()) {
-                String fieldPathElement = fieldPathElementIter.next()
-                if (fieldPathElementIter.hasNext()) {
-                    EntityDefinition.RelationshipInfo relInfo = currentEd.getRelationshipInfo(fieldPathElement)
-                    if (relInfo == null) throw new EntityException("Could not find relationship [${fieldPathElement}] for entity [${currentEd.getFullEntityName()}] in DataDocument [${dataDocumentId}]")
-                    currentEd = relInfo.relatedEd
-                    if (currentEd == null) throw new EntityException("Could not find entity [${relInfo.relatedEntityName}] in DataDocument [${dataDocumentId}]")
-
-                    // only put type many in sub-objects, same as DataDocument generation
-                    if (!relInfo.isTypeOne) {
-                        String objectName = relationshipAliasMap.get(fieldPathElement) ?: fieldPathElement
-                        Map<String, Object> subObject = (Map<String, Object>) currentProperties.get(objectName)
-                        Map<String, Object> subProperties
-                        if (subObject == null) {
-                            subProperties = [:] as Map<String, Object>
-                            subObject = [properties:subProperties] as Map<String, Object>
-                            currentProperties.put(objectName, subObject)
-                        } else {
-                            subProperties = (Map<String, Object>) subObject.get("properties")
-                        }
-                        currentProperties = subProperties
-                    }
-                } else {
-                    String fieldName = (String) dataDocumentField.fieldNameAlias ?: fieldPathElement
-                    EntityJavaUtil.FieldInfo fieldInfo = currentEd.getFieldInfo(fieldPathElement)
-                    if (fieldInfo == null) throw new EntityException("Could not find field [${fieldPathElement}] for entity [${currentEd.getFullEntityName()}] in DataDocument [${dataDocumentId}]")
-                    String fieldType = fieldInfo.type
-                    String mappingType = esTypeMap.get(fieldType) ?: 'string'
-                    Map propertyMap = [type:mappingType] as Map<String, Object>
-                    if (fieldType.startsWith("id")) propertyMap.index = 'not_analyzed'
-                    currentProperties.put(fieldName, propertyMap)
-
-                    // logger.info("DataDocument ${dataDocumentId} field ${fieldName}, propertyMap: ${propertyMap}")
-                }
-            }
-        }
-
-        // now get all the PK fields not aliased explicitly
-        for (String remainingPkName in remainingPkFields) {
-            EntityJavaUtil.FieldInfo fieldInfo = primaryEd.getFieldInfo(remainingPkName)
-            String fieldType = fieldInfo.type
-            String mappingType = esTypeMap.get(fieldType) ?: 'string'
-            Map propertyMap = [type:mappingType]
-            if (fieldType.startsWith("id")) propertyMap.index = 'not_analyzed'
-            rootProperties.put(remainingPkName, propertyMap)
-        }
-
-        if (logger.isTraceEnabled()) logger.trace("Generated ElasticSearch mapping for ${dataDocumentId}: \n${JsonOutput.prettyPrint(JsonOutput.toJson(mappingMap))}")
-
-        return mappingMap
     }
 }
