@@ -19,9 +19,12 @@ import org.apache.commons.validator.routines.UrlValidator;
 import org.codehaus.groovy.runtime.DefaultGroovyMethods;
 
 import org.moqui.context.ArtifactExecutionInfo;
+import org.moqui.entity.EntityList;
+import org.moqui.entity.EntityValue;
 import org.moqui.impl.actions.XmlAction;
 import org.moqui.impl.context.ExecutionContextImpl;
 import org.moqui.impl.entity.EntityDefinition;
+import org.moqui.util.CollectionUtilities;
 import org.moqui.util.MNode;
 import org.moqui.util.ObjectUtilities;
 import org.slf4j.Logger;
@@ -58,6 +61,7 @@ public class ServiceDefinition {
     public final XmlAction xmlAction;
 
     public final String authenticate;
+    public final ArtifactExecutionInfo.AuthzAction authzAction;
     public final String serviceType;
     public final ServiceRunner serviceRunner;
     public final boolean txIgnore;
@@ -83,6 +87,13 @@ public class ServiceDefinition {
         serviceNameNoHash = makeServiceNameNoHash(path, verb, noun);
         location = serviceNode.attribute("location");
         method = serviceNode.attribute("method");
+
+        ArtifactExecutionInfo.AuthzAction tempAction = null;
+        String authzActionAttr = serviceNode.attribute("authz-action");
+        if (authzActionAttr != null && !authzActionAttr.isEmpty()) tempAction = ArtifactExecutionInfo.authzActionByName.get(authzActionAttr);
+        if (tempAction == null) tempAction = verbAuthzActionEnumMap.get(verb);
+        if (tempAction == null) tempAction = ArtifactExecutionInfo.AUTHZA_ALL;
+        authzAction = tempAction;
 
         MNode inParameters = new MNode("in-parameters", null);
         MNode outParameters = new MNode("out-parameters", null);
@@ -664,7 +675,7 @@ public class ServiceDefinition {
         } else if ("text-email".equals(validateName)) {
             String str = pv.toString();
             if (!emailValidator.isValid(str)) {
-                Map<String, String> map = new HashMap<>(1); map.put("str", str);
+                Map<String, Object> map = new HashMap<>(1); map.put("str", str);
                 eci.getMessage().addValidationError(null, parameterName, serviceName, eci.getResource().expand("Value entered (${str}) is not a valid email address.", "", map), null);
                 return false;
             }
@@ -673,7 +684,7 @@ public class ServiceDefinition {
         } else if ("text-url".equals(validateName)) {
             String str = pv.toString();
             if (!urlValidator.isValid(str)) {
-                Map<String, String> map = new HashMap<>(1); map.put("str", str);
+                Map<String, Object> map = new HashMap<>(1); map.put("str", str);
                 eci.getMessage().addValidationError(null, parameterName, serviceName, eci.getResource().expand("Value entered (${str}) is not a valid URL.", "", map), null);
                 return false;
             }
@@ -683,7 +694,7 @@ public class ServiceDefinition {
             String str = pv.toString();
             for (char c : str.toCharArray()) {
                 if (!Character.isLetter(c)) {
-                    Map<String, String> map = new HashMap<>(1); map.put("str", str);
+                    Map<String, Object> map = new HashMap<>(1); map.put("str", str);
                     eci.getMessage().addValidationError(null, parameterName, serviceName, eci.getResource().expand("Value entered (${str}) must have only letters.", "", map), null);
                     return false;
                 }
@@ -694,7 +705,7 @@ public class ServiceDefinition {
             String str = pv.toString();
             for (char c : str.toCharArray()) {
                 if (!Character.isDigit(c)) {
-                    Map<String, String> map = new HashMap<>(1); map.put("str", str);
+                    Map<String, Object> map = new HashMap<>(1); map.put("str", str);
                     eci.getMessage().addValidationError(null, parameterName, serviceName, eci.getResource().expand("Value [${str}] must have only digits.", "", map), null);
                     return false;
                 }
@@ -760,7 +771,7 @@ public class ServiceDefinition {
             CreditCardValidator ccv = new CreditCardValidator(creditCardTypes);
             String str = pv.toString();
             if (!ccv.isValid(str)) {
-                Map<String, String> map = new HashMap<>(1); map.put("str", str);
+                Map<String, Object> map = new HashMap<>(1); map.put("str", str);
                 eci.getMessage().addValidationError(null, parameterName, serviceName, eci.getResource().expand("Value entered (${str}) is not a valid credit card number.", "", map), null);
                 return false;
             }
@@ -793,6 +804,46 @@ public class ServiceDefinition {
         map.put("delete", ArtifactExecutionInfo.AUTHZA_DELETE);
         map.put("view", ArtifactExecutionInfo.AUTHZA_VIEW);
         map.put("find", ArtifactExecutionInfo.AUTHZA_VIEW);
+        map.put("get", ArtifactExecutionInfo.AUTHZA_VIEW);
+        map.put("search", ArtifactExecutionInfo.AUTHZA_VIEW);
         verbAuthzActionEnumMap = map;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void nestedRemoveNullsFromResultMap(Map<String, Object> result) {
+        Iterator<Map.Entry<String, Object>> iter = result.entrySet().iterator();
+        while (iter.hasNext()) {
+            Map.Entry<String, Object> entry = iter.next();
+            Object value = entry.getValue();
+            if (value == null) { iter.remove(); continue; }
+            if (value instanceof EntityValue) {
+                entry.setValue(CollectionUtilities.removeNullsFromMap(((EntityValue) value).getMap()));
+            } else if (value instanceof EntityList) {
+                entry.setValue(((EntityList) value).getValueMapList());
+            } else if (value instanceof Collection) {
+                boolean foundEv = false;
+                Collection valCol = (Collection) value;
+                for (Object colEntry : valCol) {
+                    if (colEntry instanceof EntityValue) {
+                        foundEv = true;
+                    } else if (colEntry instanceof Map) {
+                        CollectionUtilities.removeNullsFromMap((Map) colEntry);
+                    } else {
+                        break;
+                    }
+                }
+                if (foundEv) {
+                    ArrayList newCol = new ArrayList(valCol.size());
+                    for (Object colEntry : valCol) {
+                        if (colEntry instanceof EntityValue) {
+                            newCol.add(CollectionUtilities.removeNullsFromMap(((EntityValue) colEntry).getMap()));
+                        } else {
+                            newCol.add(colEntry);
+                        }
+                    }
+                    entry.setValue(newCol);
+                }
+            }
+        }
     }
 }

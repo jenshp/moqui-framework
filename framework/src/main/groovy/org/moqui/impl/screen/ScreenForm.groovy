@@ -89,6 +89,12 @@ class ScreenForm {
         }
     }
 
+    boolean isDisplayOnly() {
+        ContextStack cs = ecfi.getEci().contextStack
+        return "true".equals(cs.getByString("formDisplayOnly")) || "true".equals(cs.getByString("formDisplayOnly_${formName}"))
+    }
+    boolean hasDataPrep() { return entityFindNode != null }
+
     void initForm(MNode baseFormNode, MNode newFormNode) {
         // if there is an extends, put that in first (everything else overrides it)
         if (baseFormNode.attribute("extends")) {
@@ -340,11 +346,6 @@ class ScreenForm {
         return dbFormNode
     }
 
-    boolean isDisplayOnly() {
-        ContextStack cs = ecfi.getEci().contextStack
-        return cs.getByString("formDisplayOnly") == "true" || cs.getByString("formDisplayOnly_${formName}") == "true"
-    }
-
     /** This is the main method for using an XML Form, the rendering is done based on the Node returned. */
     MNode getOrCreateFormNode() {
         // NOTE: this is cached in the ScreenRenderImpl as it may be called multiple times for a single form render
@@ -354,24 +355,21 @@ class ScreenForm {
         if (isDynamic) {
             MNode newFormNode = new MNode(internalFormNode.name, null)
             initForm(internalFormNode, newFormNode)
-            if (dbFormNodeList) {
-                for (MNode dbFormNode in dbFormNodeList) mergeFormNodes(newFormNode, dbFormNode, false, true)
-            }
+            if (dbFormNodeList != null) for (MNode dbFormNode in dbFormNodeList) mergeFormNodes(newFormNode, dbFormNode, false, true)
             return newFormNode
-        } else if (dbFormNodeList || displayOnly) {
+        } else if ((dbFormNodeList != null && dbFormNodeList.size() > 0) || displayOnly) {
             MNode newFormNode = new MNode(internalFormNode.name, null)
             // deep copy true to avoid bleed over of new fields and such
             mergeFormNodes(newFormNode, internalFormNode, true, true)
             // logger.warn("========== merging in dbFormNodeList: ${dbFormNodeList}", new BaseException("getOrCreateFormNode call location"))
-            for (MNode dbFormNode in dbFormNodeList) mergeFormNodes(newFormNode, dbFormNode, false, true)
+            if (dbFormNodeList != null) for (MNode dbFormNode in dbFormNodeList) mergeFormNodes(newFormNode, dbFormNode, false, true)
 
             if (displayOnly) {
                 // change all non-display fields to simple display elements
                 for (MNode fieldNode in newFormNode.children("field")) {
                     // don't replace header form, should be just for searching: if (fieldNode."header-field") fieldSubNodeToDisplay(newFormNode, fieldNode, (Node) fieldNode."header-field"[0])
-                    for (MNode conditionalFieldNode in fieldNode.children("conditional-field")) {
+                    for (MNode conditionalFieldNode in fieldNode.children("conditional-field"))
                         fieldSubNodeToDisplay(conditionalFieldNode)
-                    }
                     if (fieldNode.hasChild("default-field")) fieldSubNodeToDisplay(fieldNode.first("default-field"))
                 }
             }
@@ -406,16 +404,16 @@ class ScreenForm {
         if (widgetNode == null) return
         if (widgetNode.name.contains("display") || displayOnlyIgnoreNodeNames.contains(widgetNode.name)) return
 
-        if (widgetNode.name == "reset" || widgetNode.name == "submit") {
+        if ("reset".equalsIgnoreCase(widgetNode.name) || "submit".equalsIgnoreCase(widgetNode.name)) {
             fieldSubNode.children.remove(0)
             return
         }
 
-        if (widgetNode.name == "link") {
+        if ("link".equalsIgnoreCase(widgetNode.name)) {
             // if it goes to a transition with service-call or actions then remove it, otherwise leave it
             String urlType = widgetNode.attribute('url-type')
-            if ((!urlType || urlType == "transition") &&
-                    sd.getTransitionItem(widgetNode.attribute('url'), null).hasActionsOrSingleService()) {
+            if ((urlType == null || urlType.isEmpty() || "transition".equals(urlType)) &&
+                    sd.getTransitionItem(widgetNode.attribute('url'), null)?.hasActionsOrSingleService()) {
                 fieldSubNode.children.remove(0)
             }
             return
@@ -1024,6 +1022,7 @@ class ScreenForm {
         private ExecutionContextFactoryImpl ecfi
         private MNode formNode
         private boolean isListForm
+        protected Set<String> serverStatic = null
 
         private ArrayList<MNode> allFieldNodes
         private ArrayList<String> allFieldNames
@@ -1049,6 +1048,10 @@ class ScreenForm {
             ecfi = screenForm.ecfi
             formNode = screenForm.getOrCreateFormNode()
             isListForm = "form-list".equals(formNode.getName())
+
+            String serverStaticStr = formNode.attribute("server-static")
+            if (serverStaticStr) serverStatic = new HashSet(Arrays.asList(serverStaticStr.split(",")))
+            else serverStatic = screenForm.sd.serverStatic
 
             allFieldNodes = formNode.children("field")
             int afnSize = allFieldNodes.size()
@@ -1146,11 +1149,13 @@ class ScreenForm {
             }
         }
 
-        MNode getFormNode() { return formNode }
-        MNode getFieldNode(String fieldName) { return fieldNodeMap.get(fieldName) }
-        String getFormLocation() { return screenForm.location }
-        FormListRenderInfo makeFormListRenderInfo() { return new FormListRenderInfo(this) }
-        boolean isUpload() { return isUploadForm }
+        MNode getFormNode() { formNode }
+        MNode getFieldNode(String fieldName) { fieldNodeMap.get(fieldName) }
+        String getFormLocation() { screenForm.location }
+        FormListRenderInfo makeFormListRenderInfo() { new FormListRenderInfo(this) }
+        boolean isUpload() { isUploadForm }
+        boolean isList() { isListForm }
+        boolean isServerStatic(String renderMode) { return serverStatic != null && (serverStatic.contains('all') || serverStatic.contains(renderMode)) }
 
         MNode getFieldValidateNode(String fieldName) {
             MNode fieldNode = (MNode) fieldNodeMap.get(fieldName)
