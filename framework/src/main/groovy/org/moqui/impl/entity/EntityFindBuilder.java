@@ -15,6 +15,7 @@ package org.moqui.impl.entity;
 
 import org.moqui.entity.EntityException;
 import org.moqui.impl.entity.condition.EntityConditionImplBase;
+import org.moqui.impl.entity.EntityJavaUtil.FieldOrderOptions;
 import org.moqui.util.MNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,82 +40,27 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         sqlTopLevel.append("SELECT ");
     }
 
-    public void addLimitOffset(Integer limit, Integer offset) {
-        if (limit == null && offset == null) return;
+    public void makeDistinct() { sqlTopLevel.append("DISTINCT "); }
 
-        MNode databaseNode = this.efi.getDatabaseNode(getMainEntityDefinition().getEntityGroupName());
-        // if no databaseNode do nothing, means it is not a standard SQL/JDBC database
-        if (databaseNode != null) {
-            String offsetStyle = databaseNode.attribute("offset-style");
-            if ("limit".equals(offsetStyle)) {
-                // use the LIMIT/OFFSET style
-                sqlTopLevel.append(" LIMIT ").append(limit != null && limit > 0 ? limit : "ALL");
-                sqlTopLevel.append(" OFFSET ").append(offset != null ? offset : 0);
-            } else if ("fetch".equals(offsetStyle) || offsetStyle == null || offsetStyle.length() == 0) {
-                // use SQL2008 OFFSET/FETCH style by default
-                if (offset != null) sqlTopLevel.append(" OFFSET ").append(offset).append(" ROWS");
-                if (limit != null) sqlTopLevel.append(" FETCH FIRST ").append(limit).append(" ROWS ONLY");
-            }
-            // do nothing here for offset-style=cursor, taken care of in EntityFindImpl
-        }
-    }
-
-    /** Adds FOR UPDATE, should be added to end of query */
-    public void makeForUpdate() {
-        MNode databaseNode = efi.getDatabaseNode(getMainEntityDefinition().getEntityGroupName());
-        String forUpdateStr = databaseNode.attribute("for-update");
-        if (forUpdateStr != null && forUpdateStr.length() > 0) {
-            sqlTopLevel.append(" ").append(forUpdateStr);
+    public void makeCountFunction(FieldInfo[] fieldInfoArray, FieldOrderOptions[] fieldOptionsArray, boolean isDistinct, boolean isGroupBy) {
+        int fiaLength = fieldInfoArray.length;
+        if (isGroupBy || (isDistinct && fiaLength > 0)) {
+            sqlTopLevel.append("COUNT(*) FROM (SELECT ");
+            if (isDistinct) sqlTopLevel.append("DISTINCT ");
+            makeSqlSelectFields(fieldInfoArray, fieldOptionsArray, true);
+            // NOTE: this will be closed by closeCountSubSelect()
         } else {
-            sqlTopLevel.append(" FOR UPDATE");
-        }
-    }
-
-    public void makeDistinct() {
-        sqlTopLevel.append("DISTINCT ");
-    }
-
-    public void makeCountFunction(FieldInfo[] fieldInfoArray) {
-        EntityDefinition localEd = getMainEntityDefinition();
-        ArrayList<MNode> entityConditionList = localEd.internalEntityNode.children("entity-condition");
-        MNode entityConditionNode = entityConditionList != null && entityConditionList.size() > 0 ? entityConditionList.get(0) : null;
-        boolean isDistinct = entityFindBase.getDistinct() || (localEd.isViewEntity && entityConditionNode != null &&
-                "true".equals(entityConditionNode.attribute("distinct")));
-        boolean isGroupBy = localEd.entityInfo.hasFunctionAlias;
-
-        if (isGroupBy) sqlTopLevel.append("COUNT(*) FROM (SELECT ");
-
-        if (isDistinct) {
-            // old style, not sensitive to selecting limited columns: sql.append("DISTINCT COUNT(*) ")
-
-            /* NOTE: the code below was causing problems so the line above may be used instead, in view-entities in
-             * some cases it seems to cause the "COUNT(DISTINCT " to appear twice, causing an attempt to try to count
-             * a count (function="count-distinct", distinct=true in find options)
-             */
-            if (fieldInfoArray.length > 0) {
-                // TODO: possible to do all fields selected, or only one in SQL? if do all col names here it will blow up...
-                FieldInfo fi = fieldInfoArray[0];
-                MNode aliasNode = fi.fieldNode;
-                String aliasFunction = aliasNode != null ? aliasNode.attribute("function") : null;
-                if (aliasFunction != null && aliasFunction.length() > 0) {
-                    // if the field has a function already we don't want to count just it, would be meaningless
-                    sqlTopLevel.append("COUNT(DISTINCT *) ");
-                } else {
-                    sqlTopLevel.append("COUNT(DISTINCT ");
-                    sqlTopLevel.append(fi.getFullColumnName());
-                    sqlTopLevel.append(")");
-                }
-            } else {
+            if (isDistinct) {
                 sqlTopLevel.append("COUNT(DISTINCT *) ");
+            } else {
+                // NOTE: on H2 COUNT(*) is faster than COUNT(1) (and perhaps other databases? docs hint may be faster in MySQL)
+                sqlTopLevel.append("COUNT(*) ");
             }
-        } else {
-            // NOTE: on H2 COUNT(*) is faster than COUNT(1) (and perhaps other databases? docs hint may be faster in MySQL)
-            sqlTopLevel.append("COUNT(*) ");
         }
     }
 
-    public void closeCountFunctionIfGroupBy() {
-        if (getMainEntityDefinition().entityInfo.hasFunctionAlias) sqlTopLevel.append(") TEMP_NAME");
+    public void closeCountSubSelect(int fiaLength, boolean isDistinct, boolean isGroupBy) {
+        if (isGroupBy || (isDistinct && fiaLength > 0)) sqlTopLevel.append(") TEMP_NAME");
     }
 
     public void expandJoinFromAlias(final MNode entityNode, final String searchEntityAlias, Set<String> entityAliasUsedSet,
@@ -413,9 +359,7 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         }
     }
 
-    public void startWhereClause() {
-        sqlTopLevel.append(" WHERE ");
-    }
+    public void startWhereClause() { sqlTopLevel.append(" WHERE "); }
 
     public void makeGroupByClause(FieldInfo[] fieldInfoArray) {
         EntityJavaUtil.EntityInfo entityInfo = getMainEntityDefinition().entityInfo;
@@ -450,13 +394,14 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         }
     }
 
-    public void startHavingClause() {
-        sqlTopLevel.append(" HAVING ");
-    }
+    public void startHavingClause() { sqlTopLevel.append(" HAVING "); }
 
-    public void makeOrderByClause(ArrayList<String> orderByFieldList) {
+    public void makeOrderByClause(ArrayList<String> orderByFieldList, boolean hasLimitOffset) {
         int obflSize = orderByFieldList.size();
-        if (obflSize == 0) return;
+        if (obflSize == 0) {
+            if (hasLimitOffset) sqlTopLevel.append(" ORDER BY 1");
+            return;
+        }
 
         sqlTopLevel.append(" ORDER BY ");
         for (int i = 0; i < obflSize; i++) {
@@ -479,6 +424,36 @@ public class EntityFindBuilder extends EntityQueryBuilder {
             if (foo.getCaseUpperLower() != null && typeValue == 1) sqlTopLevel.append(")");
             sqlTopLevel.append(foo.getDescending() ? " DESC" : " ASC");
             if (foo.getNullsFirstLast() != null) sqlTopLevel.append(foo.getNullsFirstLast() ? " NULLS FIRST" : " NULLS LAST");
+        }
+    }
+    public void addLimitOffset(Integer limit, Integer offset) {
+        if (limit == null && offset == null) return;
+
+        MNode databaseNode = this.efi.getDatabaseNode(getMainEntityDefinition().getEntityGroupName());
+        // if no databaseNode do nothing, means it is not a standard SQL/JDBC database
+        if (databaseNode != null) {
+            String offsetStyle = databaseNode.attribute("offset-style");
+            if ("limit".equals(offsetStyle)) {
+                // use the LIMIT/OFFSET style
+                sqlTopLevel.append(" LIMIT ").append(limit != null && limit > 0 ? limit : "ALL");
+                sqlTopLevel.append(" OFFSET ").append(offset != null ? offset : 0);
+            } else if (offsetStyle == null || offsetStyle.length() == 0 || "fetch".equals(offsetStyle)) {
+                // use SQL2008 OFFSET/FETCH style by default
+                sqlTopLevel.append(" OFFSET ").append(offset != null ? offset.toString() : '0').append(" ROWS");
+                if (limit != null) sqlTopLevel.append(" FETCH FIRST ").append(limit).append(" ROWS ONLY");
+            }
+            // do nothing here for offset-style=cursor, taken care of in EntityFindImpl
+        }
+    }
+
+    /** Adds FOR UPDATE, should be added to end of query */
+    public void makeForUpdate() {
+        MNode databaseNode = efi.getDatabaseNode(getMainEntityDefinition().getEntityGroupName());
+        String forUpdateStr = databaseNode.attribute("for-update");
+        if (forUpdateStr != null && forUpdateStr.length() > 0) {
+            sqlTopLevel.append(" ").append(forUpdateStr);
+        } else {
+            sqlTopLevel.append(" FOR UPDATE");
         }
     }
 

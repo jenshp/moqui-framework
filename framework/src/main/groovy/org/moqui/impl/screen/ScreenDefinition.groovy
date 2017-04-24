@@ -28,17 +28,21 @@ import org.moqui.impl.actions.XmlAction
 import org.moqui.impl.context.ArtifactExecutionInfoImpl
 import org.moqui.impl.context.ExecutionContextFactoryImpl
 import org.moqui.impl.context.ExecutionContextImpl
-import org.moqui.impl.context.WebFacadeImpl
+import org.moqui.util.ContextStack
 import org.moqui.util.MNode
 import org.moqui.util.StringUtilities
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+
+import javax.servlet.http.HttpServletResponse
 
 @CompileStatic
 class ScreenDefinition {
     private final static Logger logger = LoggerFactory.getLogger(ScreenDefinition.class)
     private final static Set<String> scanWidgetNames = new HashSet<String>(
             ['section', 'section-iterate', 'section-include', 'form-single', 'form-list', 'tree', 'subscreens-panel', 'subscreens-menu'])
+    private final static Set<String> screenStaticWidgetNames = new HashSet<String>(
+            ['subscreens-panel', 'subscreens-menu', 'subscreens-active'])
 
     @SuppressWarnings("GrFinalVariableAccess") protected final ScreenFacadeImpl sfi
     @SuppressWarnings("GrFinalVariableAccess") protected final MNode screenNode
@@ -48,6 +52,8 @@ class ScreenDefinition {
     @SuppressWarnings("GrFinalVariableAccess") protected final String screenName
     @SuppressWarnings("GrFinalVariableAccess") final long screenLoadedTime
     protected boolean standalone = false
+    protected boolean allowExtraPath = false
+    protected Set<String> serverStatic = null
     Long sourceLastModified = null
 
     protected Map<String, ParameterItem> parameterByName = new HashMap<>()
@@ -55,6 +61,7 @@ class ScreenDefinition {
     protected Map<String, TransitionItem> transitionByName = new HashMap<>()
     protected Map<String, SubscreensItem> subscreensByName = new HashMap<>()
     protected ArrayList<SubscreensItem> subscreensItemsSorted = null
+    protected String defaultSubscreensItem = null
 
     protected XmlAction alwaysActions = null
     protected XmlAction preActions = null
@@ -84,7 +91,10 @@ class ScreenDefinition {
         String filename = location.contains("/") ? location.substring(location.lastIndexOf("/")+1) : location
         screenName = filename.contains(".") ? filename.substring(0, filename.indexOf(".")) : filename
 
-        standalone = screenNode.attribute('standalone') == "true"
+        standalone = "true".equals(screenNode.attribute("standalone"))
+        allowExtraPath = "true".equals(screenNode.attribute("allow-extra-path"))
+        String serverStaticStr = screenNode.attribute("server-static")
+        if (serverStaticStr) serverStatic = new HashSet(Arrays.asList(serverStaticStr.split(",")))
 
         // parameter
         for (MNode parameterNode in screenNode.children("parameter")) {
@@ -110,11 +120,14 @@ class ScreenDefinition {
             transitionByName.put(ti.method == "any" ? ti.name : ti.name + "#" + ti.method, ti)
         }
 
+        // default/automatic transitions
         if (!transitionByName.containsKey("actions")) transitionByName.put("actions", new ActionsTransitionItem(this))
         if (!transitionByName.containsKey("formSelectColumns")) transitionByName.put("formSelectColumns", new FormSelectColumnsTransitionItem(this))
         if (!transitionByName.containsKey("formSaveFind")) transitionByName.put("formSaveFind", new FormSavedFindsTransitionItem(this))
+        if (!transitionByName.containsKey("screenDoc")) transitionByName.put("screenDoc", new ScreenDocumentTransitionItem(this))
 
         // subscreens
+        defaultSubscreensItem = subscreensNode?.attribute("default-item")
         populateSubscreens()
 
         // macro-template - go through entire list and set all found, basically we want the last one if there are more than one
@@ -164,6 +177,16 @@ class ScreenDefinition {
             if (!hasTabMenu) for (MNode menuNode in descMap.get("subscreens-menu")) {
                 String type = menuNode.attribute("type")
                 if (type == null || type.isEmpty() || "tab".equals(type)) { hasTabMenu = true; break }
+            }
+
+            if (serverStatic == null) {
+                // if there are no elements except subscreens-panel, subscreens-active, and subscreens-menu then set serverStatic to all
+                boolean otherElements = false
+                MNode widgetsNode = rootSection.widgets.widgetsNode
+                if (!"widgets".equals(widgetsNode.getName())) widgetsNode = widgetsNode.first("widgets")
+                for (MNode child in widgetsNode.getChildren()) {
+                    if (!screenStaticWidgetNames.contains(child.getName())) {otherElements = true; break } }
+                if (!otherElements) serverStatic = new HashSet<>(['all'])
             }
         }
 
@@ -256,22 +279,22 @@ class ScreenDefinition {
         for (EntityValue subscreensItem in subscreensItemList) {
             SubscreensItem si = new SubscreensItem(subscreensItem, this)
             subscreensByName.put(si.name, si)
+            if ("Y".equals(subscreensItem.makeDefault)) defaultSubscreensItem = si.name
             if (logger.traceEnabled) logger.trace("Added database subscreen [${si.name}] at [${si.location}] to screen [${locationRef}]")
         }
     }
 
     MNode getScreenNode() { return screenNode }
     MNode getSubscreensNode() { return subscreensNode }
-    String getDefaultSubscreensItem() { return subscreensNode?.attribute('default-item') }
+    String getDefaultSubscreensItem() { return defaultSubscreensItem }
     MNode getWebSettingsNode() { return webSettingsNode }
     String getLocation() { return location }
 
     String getScreenName() { return screenName }
     boolean isStandalone() { return standalone }
+    boolean isServerStatic(String renderMode) { return serverStatic != null && (serverStatic.contains('all') || serverStatic.contains(renderMode)) }
 
-    String getDefaultMenuName() {
-        return getPrettyMenuName(screenNode.attribute("default-menu-title"), location, sfi.ecfi)
-    }
+    String getDefaultMenuName() { return getPrettyMenuName(screenNode.attribute("default-menu-title"), location, sfi.ecfi) }
     static String getPrettyMenuName(String menuName, String location, ExecutionContextFactoryImpl ecfi) {
         if (menuName == null || menuName.isEmpty()) {
             String filename = location.substring(location.lastIndexOf("/")+1, location.length()-4)
@@ -394,10 +417,7 @@ class ScreenDefinition {
             no extra path elements; allowing extra path elements causes problems only solvable by first searching without
             allowing extra path elements, then searching the full tree for all possible paths that include extra elements
             and choosing the maximal match (highest number of original sparse path elements matching actual screens)
-        if (screenNode."@allow-extra-path" == "true") {
-            // call it good
-            return remainingPathNameList
-        }
+        if (allowExtraPath) { return remainingPathNameList }
         */
 
         // nothing found, return null by default
@@ -514,6 +534,37 @@ class ScreenDefinition {
         return contentRef
     }
 
+    List<Map<String, Object>> getScreenDocumentInfoList() {
+        String localeString = sfi.ecfi.getEci().userFacade.getLocale().toString()
+        int localeUnderscoreIndex = localeString.indexOf('_')
+        String langString = null
+        // look for locale match, lang only match, or null
+        if (localeUnderscoreIndex > 0) langString = localeString.substring(0, localeUnderscoreIndex)
+
+        // do very simple cached query for all, then filter in iterator by locale
+        EntityList list = sfi.ecfi.entityFacade.find("moqui.screen.ScreenDocument").condition("screenLocation", location)
+                .orderBy("docIndex").useCache(true).disableAuthz().list()
+        int listSize = list.size()
+
+        List<Map<String, Object>> outList = new ArrayList<>(listSize)
+        for (int i = 0; i < listSize; i++) {
+            EntityValue screenDoc = (EntityValue) list.get(i)
+            String docLocale = screenDoc.getNoCheckSimple("locale")
+            if (docLocale != null && (!localeString.equals(docLocale) || (langString != null && !langString.equals(docLocale)))) continue
+            String title = screenDoc.getNoCheckSimple("docTitle")
+            if (title == null) {
+                String loc = screenDoc.getNoCheckSimple("docLocation")
+                int fnStart = loc.lastIndexOf("/") + 1
+                if (fnStart == -1) fnStart = 0
+                int fnEnd = loc.indexOf(".", fnStart)
+                if (fnEnd == -1) fnEnd = loc.length()
+                title = loc.substring(fnStart, fnEnd)
+            }
+            outList.add([title:title, index:(Long) screenDoc.getNoCheckSimple("docIndex")])
+        }
+        return outList
+    }
+
     @Override
     String toString() { return location }
 
@@ -542,15 +593,10 @@ class ScreenDefinition {
         String getName() { return name }
         Object getValue(ExecutionContext ec) {
             Object value = null
-            if (fromFieldGroovy != null) {
-                value = InvokerHelper.createScript(fromFieldGroovy, ec.contextBinding).run()
-            }
+            if (fromFieldGroovy != null) { value = InvokerHelper.createScript(fromFieldGroovy, ec.contextBinding).run() }
             if (value == null) {
-                if (valueGroovy != null) {
-                    value = InvokerHelper.createScript(valueGroovy, ec.contextBinding).run()
-                } else {
-                    value = valueString
-                }
+                if (valueGroovy != null) { value = InvokerHelper.createScript(valueGroovy, ec.contextBinding).run() }
+                else { value = valueString }
             }
             if (value == null) value = ec.context.getByString(name)
             if (value == null && ec.web != null) value = ec.web.parameters.get(name)
@@ -581,9 +627,7 @@ class ScreenDefinition {
         protected boolean readOnly = false
         protected boolean requireSessionToken = true
 
-        protected TransitionItem(ScreenDefinition parentScreen) {
-            this.parentScreen = parentScreen
-        }
+        protected TransitionItem(ScreenDefinition parentScreen) { this.parentScreen = parentScreen }
 
         TransitionItem(MNode transitionNode, ScreenDefinition parentScreen) {
             this.parentScreen = parentScreen
@@ -646,14 +690,15 @@ class ScreenDefinition {
 
         boolean checkCondition(ExecutionContextImpl ec) { return condition ? condition.checkCondition(ec) : true }
 
-        void setAllParameters(List<String> extraPathNameList, ExecutionContext ec) {
+        void setAllParameters(List<String> extraPathNameList, ExecutionContextImpl ec) {
             // get the path parameters
             if (extraPathNameList && getPathParameterList()) {
                 List<String> pathParameterList = getPathParameterList()
                 int i = 0
                 for (String extraPathName in extraPathNameList) {
                     if (pathParameterList.size() > i) {
-                        if (ec.getWeb()) ((WebFacadeImpl) ec.getWeb()).addDeclaredPathParameter(pathParameterList.get(i), extraPathName)
+                        // logger.warn("extraPathName ${extraPathName} i ${i} name ${pathParameterList.get(i)}")
+                        if (ec.webImpl != null) ec.webImpl.addDeclaredPathParameter(pathParameterList.get(i), extraPathName)
                         ec.getContext().put(pathParameterList.get(i), extraPathName)
                         i++
                     } else {
@@ -663,16 +708,16 @@ class ScreenDefinition {
             }
 
             // put parameters in the context
-            if (ec.getWeb()) {
+            if (ec.getWeb() != null) {
                 // screen parameters
                 for (ParameterItem pi in parentScreen.getParameterMap().values()) {
                     Object value = pi.getValue(ec)
-                    if (value != null) ec.getContext().put(pi.getName(), value)
+                    if (value != null) ec.contextStack.put(pi.getName(), value)
                 }
                 // transition parameters
                 for (ParameterItem pi in parameterByName.values()) {
                     Object value = pi.getValue(ec)
-                    if (value != null) ec.getContext().put(pi.getName(), value)
+                    if (value != null) ec.contextStack.put(pi.getName(), value)
                 }
             }
         }
@@ -713,6 +758,7 @@ class ScreenDefinition {
 
                 // don't push a map on the context, let the transition actions set things that will remain: sri.ec.context.push()
                 ec.contextStack.put("sri", sri)
+                // logger.warn("Running transition ${name} context: ${ec.contextStack.toString()}")
                 if (actions != null) actions.run(ec)
 
                 ResponseItem ri = null
@@ -739,7 +785,6 @@ class ScreenDefinition {
         }
     }
 
-    @CompileStatic
     static class ActionsTransitionItem extends TransitionItem {
         ActionsTransitionItem(ScreenDefinition parentScreen) {
             super(parentScreen)
@@ -751,18 +796,55 @@ class ScreenDefinition {
         // NOTE: runs pre-actions too, see sri.recursiveRunTransition() call in sri.internalRender()
         ResponseItem run(ScreenRenderImpl sri) {
             ExecutionContextImpl ec = sri.ec
+            ContextStack context = ec.contextStack
+            context.put("sri", sri)
             WebFacade wf = ec.getWeb()
             if (wf == null) throw new BaseException("Cannot run actions transition outside of a web request")
 
-            // run actions (if there are any)
-            XmlAction actions = parentScreen.rootSection.actions
-            if (actions != null) {
-                ec.contextStack.put("sri", sri)
-                actions.run(ec)
-                // use entire ec.context to get values from always-actions and pre-actions
-                wf.sendJsonResponse(ContextJavaUtil.unwrapMap(ec.contextStack))
+            ArrayList<String> extraPathList = sri.screenUrlInfo.extraPathNameList
+            if (extraPathList != null && extraPathList.size() > 0) {
+                String partName = (String) extraPathList.get(0)
+                // is it a form or tree?
+                ScreenForm form = parentScreen.formByName.get(partName)
+                if (form != null) {
+                    if (!form.hasDataPrep()) throw new BaseException("Found form ${partName} in screen ${parentScreen.getScreenName()} but it does not have its own data preparation")
+                    ScreenForm.FormInstance formInstance = form.getFormInstance()
+                    if (formInstance.isList()) {
+                        ScreenForm.FormListRenderInfo renderInfo = formInstance.makeFormListRenderInfo()
+                        Object listObj = renderInfo.getListObject(true)
+
+                        HttpServletResponse response = wf.response
+                        String listName = formInstance.formNode.attribute("list")
+                        if (context.get(listName.concat("Count")) != null) {
+                            response.addIntHeader('X-Total-Count', context.get(listName.concat("Count")) as int)
+                            response.addIntHeader('X-Page-Index', context.get(listName.concat("PageIndex")) as int)
+                            response.addIntHeader('X-Page-Size', context.get(listName.concat("PageSize")) as int)
+                            response.addIntHeader('X-Page-Max-Index', context.get(listName.concat("PageMaxIndex")) as int)
+                            response.addIntHeader('X-Page-Range-Low', context.get(listName.concat("PageRangeLow")) as int)
+                            response.addIntHeader('X-Page-Range-High', context.get(listName.concat("PageRangeHigh")) as int)
+                        }
+
+                        wf.sendJsonResponse(listObj)
+                    }
+                    // TODO: else support form-single data prep once something is added
+                } else {
+                    ScreenTree tree = parentScreen.treeByName.get(partName)
+                    if (tree != null) {
+                        tree.sendSubNodeJson()
+                    } else {
+                        throw new BaseException("Could not find form or tree named ${partName} in screen ${parentScreen.getScreenName()} so cannot run its actions")
+                    }
+                }
             } else {
-                wf.sendJsonResponse(new HashMap())
+                // run actions (if there are any)
+                XmlAction actions = parentScreen.rootSection.actions
+                if (actions != null) {
+                    actions.run(ec)
+                    // use entire ec.context to get values from always-actions and pre-actions
+                    wf.sendJsonResponse(ContextJavaUtil.unwrapMap(context))
+                } else {
+                    wf.sendJsonResponse(new HashMap())
+                }
             }
 
             return defaultResponse
@@ -821,13 +903,44 @@ class ScreenDefinition {
         }
     }
 
+    /** Special automatic transition to get content of a ScreenDocument by docIndex */
+    static class ScreenDocumentTransitionItem extends TransitionItem {
+        ScreenDocumentTransitionItem(ScreenDefinition parentScreen) {
+            super(parentScreen)
+            name = "screenDoc"; method = "any"; location = "${parentScreen.location}.transition\$${name}"
+            transitionNode = null; beginTransaction = false; readOnly = true; requireSessionToken = false
+            defaultResponse = new ResponseItem(new MNode("default-response", [type:"none"]), this, parentScreen)
+        }
+
+        ResponseItem run(ScreenRenderImpl sri) {
+            ExecutionContextImpl eci = sri.ec
+            String docIndexString = eci.contextStack.getByString("docIndex")
+            if (docIndexString == null || docIndexString.isEmpty()) {
+                sri.response.sendError(HttpServletResponse.SC_NOT_FOUND, "No docIndex specified")
+                return defaultResponse
+            }
+            Long docIndex = docIndexString as Long
+            EntityValue screenDocument = eci.entityFacade.find("moqui.screen.ScreenDocument")
+                    .condition("screenLocation", parentScreen.location).condition("docIndex", docIndex)
+                    .useCache(true).disableAuthz().one()
+            if (screenDocument == null) {
+                sri.response.sendError(HttpServletResponse.SC_NOT_FOUND, "No document found for index ${docIndex}")
+                return defaultResponse
+            }
+
+            String location = screenDocument.getNoCheckSimple("docLocation")
+            eci.resourceFacade.template(location, sri.response.getWriter())
+
+            return defaultResponse
+        }
+    }
 
     @CompileStatic
     static class ResponseItem {
         protected TransitionItem transitionItem
         protected ScreenDefinition parentScreen
         protected XmlAction condition = null
-        protected Map<String, ParameterItem> parameterMap = new HashMap()
+        protected Map<String, ParameterItem> parameterMap = new HashMap<>()
 
         protected String type
         protected String url
@@ -868,7 +981,7 @@ class ScreenDefinition {
         boolean getSaveCurrentScreen() { return saveCurrentScreen }
         boolean getSaveParameters() { return saveParameters }
 
-        Map expandParameters(List<String> extraPathNameList, ExecutionContext ec) {
+        Map expandParameters(List<String> extraPathNameList, ExecutionContextImpl ec) {
             transitionItem.setAllParameters(extraPathNameList, ec)
 
             Map ep = new HashMap()

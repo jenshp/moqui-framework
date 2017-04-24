@@ -13,8 +13,8 @@ along with this software (see the LICENSE.md file). If not, see
 <http://creativecommons.org/publicdomain/zero/1.0/>.
 -->
 <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
-    <xs:include schemaLocation="common-types-2.0.xsd"/>
-    <xs:include schemaLocation="xml-actions-2.0.xsd"/>
+    <xs:include schemaLocation="common-types-2.1.xsd"/>
+    <xs:include schemaLocation="xml-actions-2.1.xsd"/>
 
     <xs:element name="moqui-conf">
         <xs:complexType>
@@ -742,6 +742,7 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:attribute name="use-schema-for-all" default="false" type="boolean">
                 <xs:annotation><xs:documentation>Set to true to include the schema name for primary keys, foreign keys, and indexes.</xs:documentation></xs:annotation>
             </xs:attribute>
+            <xs:attribute name="use-binary-type-for-blob" default="false" type="boolean"/>
             <xs:attribute name="table-engine" type="xs:string"/>
             <xs:attribute name="character-set" type="xs:string"/>
             <xs:attribute name="collate" type="xs:string"/>
