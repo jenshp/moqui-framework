@@ -353,6 +353,10 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         // set default System properties now that all is merged
         for (MNode defPropNode in baseConfigNode.children("default-property")) {
             String propName = defPropNode.attribute("name")
+            if (System.getenv(propName) && !System.getProperty(propName)) {
+                // make env vars available as Java System properties
+                System.setProperty(propName, System.getenv(propName))
+            }
             if (!System.getProperty(propName) && !System.getenv(propName)) {
                 String valueAttr = defPropNode.attribute("value")
                 if (valueAttr != null && !valueAttr.isEmpty()) System.setProperty(propName, SystemBinding.expand(valueAttr))
@@ -1618,7 +1622,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             httpPort = webappNode.attribute("http-port") ?: null
             httpHost = webappNode.attribute("http-host") ?: null
             httpsPort = webappNode.attribute("https-port") ?: null
-            httpsHost = webappNode.attribute("https-host") ?: httpPort ?: null
+            httpsHost = webappNode.attribute("https-host") ?: httpHost ?: null
             httpsEnabled = "true".equals(webappNode.attribute("https-enabled"))
             requireSessionToken = !"false".equals(webappNode.attribute("require-session-token"))
 
