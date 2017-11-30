@@ -63,10 +63,10 @@ dependencies {
     compile project(':moqui-util')
 
     // Groovy
-    compile 'org.codehaus.groovy:groovy:2.4.12' // Apache 2.0
-    compile 'org.codehaus.groovy:groovy-json:2.4.12' // Apache 2.0
-    compile 'org.codehaus.groovy:groovy-templates:2.4.12' // Apache 2.0
-    compile 'org.codehaus.groovy:groovy-xml:2.4.12' // Apache 2.0
+    compile 'org.codehaus.groovy:groovy:2.4.13' // Apache 2.0
+    compile 'org.codehaus.groovy:groovy-json:2.4.13' // Apache 2.0
+    compile 'org.codehaus.groovy:groovy-templates:2.4.13' // Apache 2.0
+    compile 'org.codehaus.groovy:groovy-xml:2.4.13' // Apache 2.0
     // jansi is needed for groovydoc only, so in providedCompile (not included in war)
     compileOnly 'org.fusesource.jansi:jansi:1.16'
     // Findbugs need only during compile (used by freemarker and various moqui classes)
@@ -89,7 +89,7 @@ dependencies {
     // Apache Commons
     compile 'org.apache.commons:commons-csv:1.5' // Apache 2.0
     compile 'org.apache.commons:commons-email:1.5' // Apache 2.0
-    compile 'org.apache.commons:commons-lang3:3.6' // Apache 2.0; used by cron-utils
+    compile 'org.apache.commons:commons-lang3:3.7' // Apache 2.0; used by cron-utils
     compile 'commons-beanutils:commons-beanutils:1.9.3' // Apache 2.0
     compile 'commons-collections:commons-collections:3.2.2' // Apache 2.0
     compile 'commons-digester:commons-digester:2.1' // Apache 2.0
@@ -128,7 +128,7 @@ dependencies {
     compile 'com.sun.mail:javax.mail:1.6.0' // CDDL
 
     // JSoup (HTML parser, cleaner)
-    compile 'org.jsoup:jsoup:1.11.1' // MIT
+    compile 'org.jsoup:jsoup:1.11.2' // MIT
 
     // Pegdown (Markdown renderer; depends on parboiled, asm)
     compile 'org.pegdown:pegdown:1.6.0' // Apache 2.0
@@ -189,7 +189,7 @@ dependencies {
 // setup task dependencies to make sure the start sourceSets always get run
 compileJava.dependsOn startClasses
 compileTestGroovy.dependsOn classes
-sourceSets.test.compileClasspath += files(sourceSets.main.output.classesDir)
+sourceSets.test.compileClasspath += files(sourceSets.main.output.classesDirs)
 
 // by default the Java plugin runs test on build, change to not do that (only run test if explicit task)
 check.dependsOn.remove(test)
@@ -204,7 +204,7 @@ test {
 
     testLogging.showStandardStreams = true; testLogging.showExceptions = true
 
-    classpath += files(sourceSets.main.output.classesDir); classpath += files(projectDir.absolutePath)
+    classpath += files(sourceSets.main.output.classesDirs); classpath += files(projectDir.absolutePath)
     // filter out classpath entries that don't exist (gradle adds a bunch of these), or ElasticSearch JarHell will blow up
     classpath = classpath.filter { it.exists() }
 
