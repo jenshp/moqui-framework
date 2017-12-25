@@ -19,6 +19,7 @@ import groovy.transform.CompileStatic
 import org.moqui.BaseArtifactException
 import org.moqui.BaseException
 import org.moqui.context.*
+import org.moqui.context.MessageFacade.MessageInfo
 import org.moqui.entity.EntityCondition.ComparisonOperator
 import org.moqui.entity.EntityException
 import org.moqui.entity.EntityList
@@ -207,7 +208,16 @@ class ScreenRenderImpl implements ScreenRender {
         Map<String, Object> responseMap = new HashMap<>()
         // add saveMessagesToSession, saveRequestParametersToSession/saveErrorParametersToSession data
         // add all plain object data from session?
-        if (ec.message.getMessages().size() > 0) responseMap.put("messages", ec.message.messages)
+        List<MessageInfo> messageInfos = ec.message.getMessageInfos()
+        int messageInfosSize = messageInfos.size()
+        if (messageInfosSize > 0) {
+            List<Map> miMapList = new ArrayList<>(messageInfosSize)
+            for (int i = 0; i < messageInfosSize; i++) {
+                MessageInfo messageInfo = (MessageInfo) messageInfos.get(i)
+                miMapList.add([message:messageInfo.message, type:messageInfo.typeString])
+            }
+            responseMap.put("messageInfos", miMapList)
+        }
         if (ec.message.getErrors().size() > 0) responseMap.put("errors", ec.message.errors)
         if (ec.message.getValidationErrors().size() > 0) {
             List<ValidationError> valErrorList = ec.message.getValidationErrors()
@@ -1447,8 +1457,28 @@ class ScreenRenderImpl implements ScreenRender {
 
                 if (hasAllDepends) {
                     UrlInstance transUrl = buildUrl(transition)
-                    ScreenTest screenTest = ec.screen.makeTest().rootScreen(rootScreenLocation)
+                    ScreenTest screenTest = ec.screen.makeTest().rootScreen(rootScreenLocation).skipJsonSerialize(true)
                     ScreenTest.ScreenTestRender str = screenTest.render(transUrl.getPathWithParams(), parameters, null)
+
+                    Object jsonObj = str.getJsonObject()
+                    List optsList = null
+                    if (jsonObj instanceof List) {
+                        optsList = (List) jsonObj
+                    } else if (jsonObj instanceof Map) {
+                        Map jsonMap = (Map) jsonObj
+                        Object optionsObj = jsonMap.get("options")
+                        if (optionsObj instanceof List) optsList = (List) optionsObj
+                    }
+                    if (optsList != null) for (Object entryObj in optsList) {
+                        if (entryObj instanceof Map) {
+                            Map entryMap = (Map) entryObj
+                            String valueObj = entryMap.get(valueField)
+                            String labelObj = entryMap.get(labelField)
+                            if (valueObj && labelObj) optsMap.put(valueObj, labelObj)
+                        }
+                    }
+
+                    /* old approach before skipJsonSerialize
                     String output = str.getOutput()
 
                     try {
@@ -1472,6 +1502,7 @@ class ScreenRenderImpl implements ScreenRender {
                     } catch (Throwable t) {
                         logger.warn("Error getting field options from transition", t)
                     }
+                    */
                 }
             }
         }
