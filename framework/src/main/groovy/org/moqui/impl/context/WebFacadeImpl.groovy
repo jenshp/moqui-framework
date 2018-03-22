@@ -153,7 +153,7 @@ class WebFacadeImpl implements WebFacade {
                     logger.error("Error parsing HTTP request body JSON: ${t.toString()}", t)
                     jsonParameters = [_requestBodyJsonParseError:t.getMessage()] as Map<String, Object>
                 }
-                logger.warn("=========== Got JSON HTTP request body: ${jsonParameters}")
+                // logger.warn("=========== Got JSON HTTP request body: ${jsonParameters}")
             }
         } else if (ServletFileUpload.isMultipartContent(request)) {
             // if this is a multi-part request, get the data for it
@@ -719,7 +719,7 @@ class WebFacadeImpl implements WebFacade {
         ResourceReference rr = eci.resource.getLocationReference(location)
         if (rr == null || (rr.supportsExists() && !rr.getExists())) {
             logger.warn("Sending not found response, resource not found at: ${location}")
-            response.sendError(HttpServletResponse.SC_NOT_FOUND)
+            response.sendError(HttpServletResponse.SC_NOT_FOUND, "Resource not found at ${location}")
             return
         }
         String contentType = rr.getContentType()
@@ -734,7 +734,7 @@ class WebFacadeImpl implements WebFacade {
             InputStream is = rr.openStream()
             if (is == null) {
                 logger.warn("Sending not found response, openStream returned null for location: ${location}")
-                response.sendError(HttpServletResponse.SC_NOT_FOUND)
+                response.sendError(HttpServletResponse.SC_NOT_FOUND, "Resource not found at ${location}")
                 return
             }
 
@@ -753,6 +753,45 @@ class WebFacadeImpl implements WebFacade {
             String rrText = rr.getText()
             if (rrText) response.writer.append(rrText)
             response.writer.flush()
+        }
+    }
+
+    static Map<Integer, String> errorCodeNames = [401:"Authentication Required", 403:"Access Forbidden", 404:"Not Found",
+            429:"Too Many Requests", 500:"Internal Server Error"]
+    @Override
+    void sendError(int errorCode, String message, Throwable origThrowable) {
+        if ((message == null || message.isEmpty()) && origThrowable != null) message = origThrowable.message
+
+        String acceptHeader = request.getHeader("Accept")
+        if (acceptHeader == null || acceptHeader.isEmpty() || acceptHeader.contains("text/html") ||
+                acceptHeader.contains("text/*") || acceptHeader.contains("*/*")) {
+            response.setStatus(errorCode)
+            response.setContentType("text/html")
+            response.setCharacterEncoding("UTF-8")
+            String errorCodeName = errorCodeNames.get(errorCode) ?: ""
+
+            Writer writer = response.getWriter()
+            writer.write('<html><head><meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>')
+            writer.write("<title>Error ${errorCode} ${errorCodeName}</title>\n")
+            writer.write("</head><body>\n")
+            writer.write("<h2>Error ${errorCode} ${errorCodeName}</h2>")
+            writer.write("<p>Problem accessing ${request.getPathInfo()}</p>\n")
+            if (message != null && !message.isEmpty()) writer.write("<p>Reason: ${message}</p>\n")
+            writer.write("</body></html>\n")
+
+            // NOTE: maybe include throwable info, do we ever want that?
+
+            /* nothing special for JSON for now
+            } else if (acceptHeader.contains("application/json") || acceptHeader.contains("text/json")) {
+                response.setContentType("application/json")
+                response.setCharacterEncoding("UTF-8")
+            */
+        } else {
+            if (message != null && !message.isEmpty()) {
+                response.sendError(errorCode, message)
+            } else {
+                response.sendError(errorCode)
+            }
         }
     }
 
@@ -807,10 +846,12 @@ class WebFacadeImpl implements WebFacade {
                     parmStack.pop()
                 }
                 response.addIntHeader('X-Run-Time-ms', (System.currentTimeMillis() - startTime) as int)
+                response.addHeader("moquiSessionToken", getSessionToken())
                 sendJsonResponse(responseList)
             } else {
                 Object responseObj = eci.entityFacade.rest(method, extraPathNameList, parmStack, masterNameInPath)
                 response.addIntHeader('X-Run-Time-ms', (System.currentTimeMillis() - startTime) as int)
+                response.addHeader("moquiSessionToken", getSessionToken())
 
                 if (parmStack.xTotalCount != null) response.addIntHeader('X-Total-Count', parmStack.xTotalCount as int)
                 if (parmStack.xPageIndex != null) response.addIntHeader('X-Page-Index', parmStack.xPageIndex as int)
@@ -901,6 +942,7 @@ class WebFacadeImpl implements WebFacade {
                     parmStack.pop()
                 }
                 response.addIntHeader('X-Run-Time-ms', (System.currentTimeMillis() - startTime) as int)
+                response.addHeader("moquiSessionToken", getSessionToken())
 
                 if (eci.message.hasError()) {
                     // if error return that
@@ -916,6 +958,7 @@ class WebFacadeImpl implements WebFacade {
                 RestApi.RestResult restResult = eci.serviceFacade.restApi.run(extraPathNameList, eci)
                 eci.contextStack.pop()
                 response.addIntHeader('X-Run-Time-ms', (System.currentTimeMillis() - startTime) as int)
+                response.addHeader("moquiSessionToken", getSessionToken())
                 restResult.setHeaders(response)
 
                 if (eci.message.hasError()) {
