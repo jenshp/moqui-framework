@@ -15,6 +15,7 @@ package org.moqui.impl.context
 
 import groovy.transform.CompileStatic
 import org.moqui.context.ArtifactExecutionInfo
+import org.moqui.context.AuthenticationRequiredException
 import org.moqui.entity.EntityCondition
 import org.moqui.impl.context.ArtifactExecutionInfoImpl.ArtifactAuthzCheck
 import org.moqui.impl.entity.EntityValueBase
@@ -175,7 +176,7 @@ class UserFacadeImpl implements UserFacade {
                     Map cvResult = eci.service.sync().name("create", "moqui.server.Visitor")
                             .parameter("createdDate", getNowTimestamp()).disableAuthz().call()
                     cookieVisitorId = (String) cvResult?.visitorId
-                    logger.info("Created new Visitor with ID [${cookieVisitorId}] in session [${session.id}]")
+                    if (logger.traceEnabled) logger.trace("Created new Visitor with ID [${cookieVisitorId}] in session [${session.id}]")
                 }
                 if (cookieVisitorId) {
                     // whether it existed or not, add it again to keep it fresh; stale cookies get thrown away
@@ -220,7 +221,7 @@ class UserFacadeImpl implements UserFacade {
                 if (visitResult) {
                     session.setAttribute("moqui.visitId", visitResult.visitId)
                     this.visitId = visitResult.visitId
-                    logger.info("Created new Visit with ID [${this.visitId}] in session [${session.id}]")
+                    if (logger.traceEnabled) logger.trace("Created new Visit with ID [${this.visitId}] in session [${session.id}]")
                 }
             }
         }
@@ -610,7 +611,7 @@ class UserFacadeImpl implements UserFacade {
     }
     @Override String getLoginKey() {
         String userId = getUserId()
-        if (!userId) throw new IllegalStateException("No active user, cannot get login key")
+        if (!userId) throw new AuthenticationRequiredException("No active user, cannot get login key")
 
         // generate login key
         String loginKey = StringUtilities.getRandomString(40)

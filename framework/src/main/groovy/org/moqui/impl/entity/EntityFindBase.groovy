@@ -830,6 +830,8 @@ abstract class EntityFindBase implements EntityFind {
                 }
             }
             if (!hasFieldOptions) fieldOptionsArray = (FieldOrderOptions[]) null
+            if (fieldOptionsArray == null && ftsSize == entityInfo.allFieldInfoArray.length)
+                fieldInfoArray = entityInfo.allFieldInfoArray
         }
 
         // if (ed.getEntityName() == "Asset") logger.warn("=========== find one of Asset ${this.simpleAndMap.get('assetId')}", new Exception("Location"))
@@ -1060,6 +1062,8 @@ abstract class EntityFindBase implements EntityFind {
                     }
                 }
                 if (!hasFieldOptions) fieldOptionsArray = (FieldOrderOptions[]) null
+                if (fieldOptionsArray == null && ftsSize == entityInfo.allFieldInfoArray.length)
+                    fieldInfoArray = entityInfo.allFieldInfoArray
             }
 
             EntityConditionImplBase queryWhereCondition = whereCondition
@@ -1183,6 +1187,8 @@ abstract class EntityFindBase implements EntityFind {
                 }
             }
             if (!hasFieldOptions) fieldOptionsArray = (FieldOrderOptions[]) null
+            if (fieldOptionsArray == null && ftsSize == entityInfo.allFieldInfoArray.length)
+                fieldInfoArray = entityInfo.allFieldInfoArray
         }
 
         // before combining conditions let ArtifactFacade add entity filters associated with authz
@@ -1293,6 +1299,8 @@ abstract class EntityFindBase implements EntityFind {
                     }
                 }
                 if (!hasFieldOptions) fieldOptionsArray = (FieldOrderOptions[]) null
+                if (fieldOptionsArray == null && ftsSize == entityInfo.allFieldInfoArray.length)
+                    fieldInfoArray = entityInfo.allFieldInfoArray
             }
             // logger.warn("fieldsToSelect: ${fieldsToSelect} fieldInfoArray: ${fieldInfoArray}")
 
@@ -1381,24 +1389,29 @@ abstract class EntityFindBase implements EntityFind {
 
         // if there are no EECAs for the entity OR there is a TransactionCache in place just call ev.delete() on each
         boolean useEvDelete = txCache != null || efi.hasEecaRules(ed.getFullEntityName())
-        if (!useEvDelete) this.resultSetConcurrency(ResultSet.CONCUR_UPDATABLE)
         this.useCache(false)
-        EntityListIterator eli = (EntityListIterator) null
         long totalDeleted = 0
-        try {
-            eli = iterator()
-            EntityValue ev
-            while ((ev = eli.next()) != null) {
-                if (useEvDelete) {
-                    ev.delete()
-                } else {
-                    // not longer need to clear cache, eli.remote() does that
-                    eli.remove()
-                }
+        if (useEvDelete) {
+            EntityList el = list()
+            int elSize = el.size()
+            for (int i = 0; i < elSize; i++) {
+                EntityValue ev = (EntityValue) el.get(i)
+                ev.delete()
                 totalDeleted++
             }
-        } finally {
-            if (eli != null) eli.close()
+        } else {
+            this.resultSetConcurrency(ResultSet.CONCUR_UPDATABLE)
+            EntityListIterator eli = (EntityListIterator) null
+            try {
+                eli = iterator()
+                while (eli.next() != null) {
+                    // no longer need to clear cache, eli.remove() does that
+                    eli.remove()
+                    totalDeleted++
+                }
+            } finally {
+                if (eli != null) eli.close()
+            }
         }
         return totalDeleted
     }
