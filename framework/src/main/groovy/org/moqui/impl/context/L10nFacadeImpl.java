@@ -150,7 +150,10 @@ public class L10nFacadeImpl implements L10nFacade {
 
     @Override
     public Time parseTime(String input, String format) {
-        Locale curLocale = getLocale();
+        return parseTime(input, format, null);
+    }
+    public Time parseTime(String input, String format, Locale locale) {
+        Locale curLocale = locale != null ? locale : getLocale();
         TimeZone curTz = getTimeZone();
         if (format == null || format.isEmpty()) format = "HH:mm:ss.SSS";
         Calendar cal = calendarValidator.validate(input, format, curLocale, curTz);
@@ -187,8 +190,11 @@ public class L10nFacadeImpl implements L10nFacade {
 
     @Override
     public java.sql.Date parseDate(String input, String format) {
+        return parseDate(input, format, null);
+    }
+    public java.sql.Date parseDate(String input, String format, Locale locale) {
         if (format == null || format.isEmpty()) format = "yyyy-MM-dd";
-        Locale curLocale = getLocale();
+        Locale curLocale = locale != null ? locale : getLocale();
 
         // NOTE DEJ 20150317 Date parsing in terms of time zone causes funny issues because the time part of the long
         //   since epoch representation is lost going to/from the DB, especially since the time portion is set to 0 and
@@ -309,7 +315,11 @@ public class L10nFacadeImpl implements L10nFacade {
     }
 
     @Override public BigDecimal parseNumber(String input, String format) {
-        return bigDecimalValidator.validate(input, format, getLocale()); }
+        return parseNumber(input, format, null);
+    }
+    @Override public BigDecimal parseNumber(String input, String format, Locale locale) {
+        if (locale == null) locale = getLocale();
+        return bigDecimalValidator.validate(input, format, locale); }
     public String formatNumber(Number input, String format, Locale locale) {
         if (locale == null) locale = getLocale();
         return bigDecimalValidator.format(input, format, locale);
