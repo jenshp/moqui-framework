@@ -41,8 +41,8 @@ import java.time.ZonedDateTime
  * Uses cron-utils for cron processing, see:
  *     https://github.com/jmrozanec/cron-utils
  * For a Quartz cron reference see:
- *     http://www.quartz-scheduler.org/documentation/quartz-2.x/tutorials/crontrigger.html
- *     https://www.quartz-scheduler.org/api/2.2.1/org/quartz/CronExpression.html
+ *     http://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/tutorial-lesson-06.html
+ *     http://www.quartz-scheduler.org/api/2.3.0/org/quartz/CronExpression.html
  *
  * Handy cron strings: [0 0 2 * * ?] every night at 2:00 am, [0 0/15 * * * ?] every 15 minutes, [0 0/2 * * * ?] every 2 minutes
  */
